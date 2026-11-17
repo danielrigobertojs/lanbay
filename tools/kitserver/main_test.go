@@ -104,6 +104,18 @@ func TestBootstrapReadsMicroSDDriveLetterWithoutTrimEnd(t *testing.T) {
 	}
 }
 
+func TestBootstrapCollectsEverySpikeReport(t *testing.T) {
+	b, err := readBootstrap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{"function Copy-SpikeReports", "'winget-backend', 'recycle-bin', 'execution-context'", "Copy-SpikeReports"} {
+		if !bytes.Contains(b, []byte(fragment)) {
+			t.Fatalf("bootstrap does not collect report fragment %q", fragment)
+		}
+	}
+}
+
 func TestResultsStoredUnmodified(t *testing.T) {
 	s := testServer(t, 1024)
 	body := []byte{0, 1, 2, 3, 255, 0}
