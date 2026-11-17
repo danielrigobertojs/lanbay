@@ -36,8 +36,11 @@ identidad, elevación, sesión, búsqueda/instalación winget, MSI y escritura
 efímera en `C:\` y microSD. El paquete winget por defecto es `7zip.7zip`; si
 ya existe, el informe lo dice. Cambie `-WingetID` por un paquete de prueba que
 pueda eliminarse. La instalación winget requiere `-AllowInstall`; el MSI
-requiere además `-AllowMSI` y el EXE interactivo `-AllowInteractive`. El
-bootstrap pide una confirmación explícita antes de pasar esos permisos.
+requiere además `-AllowMSI` y el EXE interactivo `-AllowInteractive`. Los
+valores de MSI y EXE pueden quedar vacíos: el informe los registra como
+omitidos y el resto de comprobaciones continúa. El bootstrap pide una
+confirmación explícita e independiente antes de permitir winget, MSI o el EXE
+interactivo.
 
 ## Limpieza
 
