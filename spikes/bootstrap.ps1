@@ -32,15 +32,16 @@ function Read-Required([string]$Prompt, [string]$Current) {
 }
 function Write-EnvironmentReport {
   $appInstaller = Get-AppxPackage Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue | Select-Object -First 1
-  [ordered]@{
+  $report = [ordered]@{
     generated_at = (Get-Date).ToUniversalTime().ToString('o')
-    windows = Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, OsBuildNumber, OsLanguage, OsLocale
-    app_installer = if ($appInstaller) { $appInstaller.Version.ToString() } else { $null }
-    winget = try { (& winget --version 2>&1 | Out-String).Trim() } catch { $_.Exception.Message }
+    windows = @(Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, OsBuildNumber, OsLanguage, OsLocale)
+    app_installer = $(if ($appInstaller) { $appInstaller.Version.ToString() } else { $null })
+    winget = $(try { (& winget --version 2>&1 | Out-String).Trim() } catch { $_.Exception.Message })
     powershell_5 = (& powershell.exe -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>$null | Out-String).Trim()
-    powershell_7 = if (Get-Command pwsh.exe -ErrorAction SilentlyContinue) { (& pwsh.exe -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>$null | Out-String).Trim() } else { $null }
-    micro_sd_file_system = if ($MicroSDRoot) { (Get-Volume -DriveLetter $MicroSDRoot.TrimEnd(':','\\') -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FileSystem) } else { $null }
-  } | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 (Join-Path $kitRoot 'out\environment.json')
+    powershell_7 = $(if (Get-Command pwsh.exe -ErrorAction SilentlyContinue) { (& pwsh.exe -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>$null | Out-String).Trim() } else { $null })
+    micro_sd_file_system = $(if ($MicroSDRoot) { (Get-Volume -DriveLetter $MicroSDRoot.TrimEnd(':','\\') -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FileSystem) } else { $null })
+  }
+  $report | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 (Join-Path $kitRoot 'out\environment.json')
 }
 
 Require-Administrator
