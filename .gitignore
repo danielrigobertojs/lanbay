@@ -2,4 +2,6 @@ dist/
 node_modules/
 web/node_modules/
 web/.svelte-kit/
+!internal/web/dist/
+!internal/web/dist/**
 
