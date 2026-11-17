@@ -30,6 +30,13 @@ function Read-Required([string]$Prompt, [string]$Current) {
   if ($NonInteractive) { return '' }
   return Read-Host $Prompt
 }
+function Normalize-VolumeRoot([string]$Value) {
+  $value = $Value.Trim()
+  if ($value -notmatch '^[A-Za-z](:)?\\?$') {
+    throw 'La letra de microSD debe tener el formato D:, D:\\ o D.'
+  }
+  return ([string]$value[0]).ToUpperInvariant() + ':\'
+}
 function Write-EnvironmentReport {
   $appInstaller = Get-AppxPackage Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue | Select-Object -First 1
   $microSDDriveLetter = if ($MicroSDRoot) { [string]$MicroSDRoot[0] } else { $null }
@@ -78,7 +85,7 @@ $executionContextStarted = $false
 if ($NonInteractive) {
   & (Join-Path $kitRoot 'volumes\probe.exe') -out (Join-Path $kitRoot 'out\with-microsd.json')
 } else {
-  $MicroSDRoot = Read-Required 'Letra de la microSD (por ejemplo E:)' $MicroSDRoot
+  $MicroSDRoot = Normalize-VolumeRoot (Read-Required 'Letra de la microSD (por ejemplo E:)' $MicroSDRoot)
   $TestMSI = Read-Required 'Ruta completa del MSI de prueba (Enter para omitir)' $TestMSI
   $InteractiveInstaller = Read-Required 'Ruta completa del EXE interactivo (Enter para omitir)' $InteractiveInstaller
   Write-Host 'Ejecutando inventario de volúmenes con la microSD insertada…'
@@ -94,7 +101,7 @@ if ($NonInteractive) {
 
   if (Confirm-Action 'El spike de contexto ejecutará comprobaciones sin instalar software.') {
     $register = Join-Path $kitRoot 'execution-context\register-task.ps1'
-    $registerParams = @{ RunnerPath = (Join-Path $kitRoot 'execution-context\runner.exe'); MicroSDRoot = ($MicroSDRoot + '\\') }
+    $registerParams = @{ RunnerPath = (Join-Path $kitRoot 'execution-context\runner.exe'); MicroSDRoot = $MicroSDRoot }
     if ($TestMSI) { $registerParams.TestMSI = $TestMSI }
     if ($InteractiveInstaller) { $registerParams.InteractiveInstaller = $InteractiveInstaller }
     if (Confirm-Action '¿Permite instalar el paquete de prueba de winget?') { $registerParams.AllowInstall = $true }
