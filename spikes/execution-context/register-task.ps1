@@ -11,6 +11,12 @@ param(
   [switch]$AllowInteractive
 )
 $ErrorActionPreference = 'Stop'
+function ConvertTo-WindowsCommandLineArgument([string]$Argument) {
+  if ($Argument -notmatch '[\s"]') { return $Argument }
+  $escaped = $Argument -replace '(\\*)"', '$1$1\"'
+  $escaped = $escaped -replace '(\\+)$', '$1$1'
+  return '"' + $escaped + '"'
+}
 $scriptDir = Split-Path -Parent $PSCommandPath
 $out = Join-Path $scriptDir 'out'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
@@ -20,7 +26,7 @@ if ($InteractiveInstaller) { $arguments += @('-interactive-installer', $Interact
 if ($AllowInstall) { $arguments += '-allow-install' }
 if ($AllowMSI) { $arguments += '-allow-msi' }
 if ($AllowInteractive) { $arguments += '-allow-interactive' }
-$quoted = $arguments | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }
+$quoted = $arguments | ForEach-Object { ConvertTo-WindowsCommandLineArgument $_ }
 $action = New-ScheduledTaskAction -Execute $RunnerPath -Argument ($quoted -join ' ')
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
