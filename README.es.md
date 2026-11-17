@@ -20,6 +20,36 @@ dist/lanbay.exe version
 
 El objetivo `windows` usa `CGO_ENABLED=0` y genera `windows/amd64`.
 
+## Kit de bootstrap M0 para Windows
+
+Antes de instalar Lanbay se deben ejecutar sus spikes M0 en el equipo Windows
+objetivo. Desde una Mac en la misma LAN privada, genera y sirve un kit ya
+compilado:
+
+```sh
+make ally-kit
+go run ./tools/kitserver
+```
+
+El servidor imprime un único comando. Abre **PowerShell como administrador**
+en Windows y pégalo. El servidor es temporal, genera un token aleatorio, solo
+atiende clientes LAN privados o link-local, y se detiene al recibir los
+resultados o tras 30 minutos de inactividad. El bootstrap descarga el kit,
+verifica su SHA-256 antes de extraer o ejecutar nada y guía los pasos que
+requieren presencia: microSD, MSI de prueba y confirmaciones de acciones
+destructivas. Al final sube un archivo de resultados sin modificar a
+`m0-results/<timestamp>/` en la Mac.
+
+Este flujo es una comodidad exclusiva de M0; no instala Lanbay. Usa HTTP de
+forma deliberada porque el propio comando de bootstrap sale de la Mac local.
+El token y el hash fijado del kit reducen el riesgo, pero no ofrecen la
+protección TLS frente a un atacante que controle la LAN. Es un riesgo aceptado
+y limitado en el tiempo para M0: no uses este servidor para distribuir
+releases de Lanbay.
+
+Consulta la [guía de spikes M0](spikes/README.md) para prerrequisitos, la
+alternativa manual, limpieza y la evidencia que aún debe obtenerse en Windows.
+
 ## Seguridad y licencia
 
 No expongas Lanbay a internet. El binario aún no está firmado y SmartScreen o
