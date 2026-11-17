@@ -125,3 +125,25 @@ func TestRunStopsAfterInactivity(t *testing.T) {
 		t.Fatal("server did not stop after inactivity")
 	}
 }
+
+func TestAddressesForInterfacePrefersPrivateIPv4(t *testing.T) {
+	addresses := []net.Addr{
+		&net.IPNet{IP: net.ParseIP("fe80::1"), Mask: net.CIDRMask(64, 128)},
+		&net.IPNet{IP: net.ParseIP("192.168.1.20"), Mask: net.CIDRMask(24, 32)},
+	}
+	v4, v6 := addressesForInterface(net.Interface{Name: "en0"}, addresses)
+	if v4 == nil || !v4.IP.Equal(net.ParseIP("192.168.1.20")) {
+		t.Fatalf("IPv4 = %#v", v4)
+	}
+	if v6 != nil {
+		t.Fatalf("IPv6 fallback = %#v", v6)
+	}
+}
+
+func TestAddressesForInterfaceScopesLinkLocalIPv6(t *testing.T) {
+	addresses := []net.Addr{&net.IPNet{IP: net.ParseIP("fe80::1"), Mask: net.CIDRMask(64, 128)}}
+	v4, v6 := addressesForInterface(net.Interface{Name: "en0"}, addresses)
+	if v4 != nil || v6 == nil || v6.Zone != "en0" {
+		t.Fatalf("addresses = %#v %#v", v4, v6)
+	}
+}

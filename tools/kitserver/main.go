@@ -206,11 +206,12 @@ func randomToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-func lanAddress() (net.IP, error) {
+func lanAddress() (*net.TCPAddr, error) {
 	interfaces, err := net.Interfaces()
 	if err != nil {
 		return nil, err
 	}
+	var fallback *net.TCPAddr
 	for _, iface := range interfaces {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
@@ -219,14 +220,40 @@ func lanAddress() (net.IP, error) {
 		if err != nil {
 			continue
 		}
-		for _, address := range addrs {
-			ip, _, err := net.ParseCIDR(address.String())
-			if err == nil && privateOrLinkLocal(ip) && !ip.IsLoopback() {
-				return ip, nil
-			}
+		v4, v6 := addressesForInterface(iface, addrs)
+		if v4 != nil {
+			return v4, nil
+		}
+		if fallback == nil && v6 != nil {
+			fallback = v6
 		}
 	}
+	if fallback != nil {
+		return fallback, nil
+	}
 	return nil, errors.New("no private or link-local LAN address found; pass -listen with one")
+}
+
+// addressesForInterface selects a private IPv4 address before IPv6. IPv6
+// link-local addresses require an interface zone for a valid bind on macOS.
+func addressesForInterface(iface net.Interface, addresses []net.Addr) (v4, v6 *net.TCPAddr) {
+	for _, address := range addresses {
+		ip, _, err := net.ParseCIDR(address.String())
+		if err != nil || !privateOrLinkLocal(ip) || ip.IsLoopback() {
+			continue
+		}
+		candidate := &net.TCPAddr{IP: ip}
+		if ip.To4() != nil {
+			return candidate, nil
+		}
+		if ip.IsLinkLocalUnicast() {
+			candidate.Zone = iface.Name
+		}
+		if v6 == nil {
+			v6 = candidate
+		}
+	}
+	return nil, v6
 }
 
 func main() {
@@ -246,11 +273,13 @@ func main() {
 		os.Exit(2)
 	}
 	if addr.IP == nil || addr.IP.IsUnspecified() {
-		addr.IP, err = lanAddress()
+		selected, err := lanAddress()
 		if err != nil {
 			slog.Error("choose LAN address", "error", err)
 			os.Exit(2)
 		}
+		addr.IP = selected.IP
+		addr.Zone = selected.Zone
 	}
 	if !privateOrLinkLocal(addr.IP) {
 		slog.Error("listen address must be private, link-local, or loopback")
