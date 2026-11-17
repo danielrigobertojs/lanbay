@@ -24,8 +24,7 @@ ally-kit:
 	cp spikes/recycle-bin/{README.md,run.ps1,recycle.ps1} dist/ally-kit/recycle-bin/
 	cp spikes/execution-context/{README.md,register-task.ps1,cleanup.ps1} dist/ally-kit/execution-context/
 	cp spikes/bootstrap.ps1 dist/ally-kit/bootstrap.ps1
-	cd dist/ally-kit && zip -qr ../lanbay-m0-kit.zip .
-	shasum -a 256 dist/lanbay-m0-kit.zip > dist/lanbay-m0-kit.zip.sha256
+	go run ./tools/kitpack -source dist/ally-kit -output dist/lanbay-m0-kit.zip -sha256 dist/lanbay-m0-kit.zip.sha256
 
 test:
 	CGO_ENABLED=0 go test -count=1 -race ./...
