@@ -91,6 +91,19 @@ func TestBootstrapOmitsEmptyInstallerArguments(t *testing.T) {
 	}
 }
 
+func TestBootstrapReadsMicroSDDriveLetterWithoutTrimEnd(t *testing.T) {
+	b, err := readBootstrap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(b, []byte("TrimEnd")) {
+		t.Fatal("bootstrap must not pass a multi-character trim argument to PowerShell")
+	}
+	if !bytes.Contains(b, []byte("$microSDDriveLetter = if ($MicroSDRoot) { [string]$MicroSDRoot[0] } else { $null }")) {
+		t.Fatal("bootstrap must derive the drive letter without trimming path characters")
+	}
+}
+
 func TestResultsStoredUnmodified(t *testing.T) {
 	s := testServer(t, 1024)
 	body := []byte{0, 1, 2, 3, 255, 0}
