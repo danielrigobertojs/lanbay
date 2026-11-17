@@ -94,13 +94,13 @@ if ($NonInteractive) {
 
   if (Confirm-Action 'El spike de contexto ejecutará comprobaciones sin instalar software.') {
     $register = Join-Path $kitRoot 'execution-context\register-task.ps1'
-    $registerArgs = @('-RunnerPath', (Join-Path $kitRoot 'execution-context\runner.exe'), '-MicroSDRoot', ($MicroSDRoot + '\\'))
-    if ($TestMSI) { $registerArgs += @('-TestMSI', $TestMSI) }
-    if ($InteractiveInstaller) { $registerArgs += @('-InteractiveInstaller', $InteractiveInstaller) }
-    if (Confirm-Action '¿Permite instalar el paquete de prueba de winget?') { $registerArgs += '-AllowInstall' }
-    if ($TestMSI -and (Confirm-Action '¿Permite instalar el MSI de prueba?')) { $registerArgs += '-AllowMSI' }
-    if ($InteractiveInstaller -and (Confirm-Action '¿Permite abrir el EXE interactivo de prueba?')) { $registerArgs += '-AllowInteractive' }
-    & $register @registerArgs
+    $registerParams = @{ RunnerPath = (Join-Path $kitRoot 'execution-context\runner.exe'); MicroSDRoot = ($MicroSDRoot + '\\') }
+    if ($TestMSI) { $registerParams.TestMSI = $TestMSI }
+    if ($InteractiveInstaller) { $registerParams.InteractiveInstaller = $InteractiveInstaller }
+    if (Confirm-Action '¿Permite instalar el paquete de prueba de winget?') { $registerParams.AllowInstall = $true }
+    if ($TestMSI -and (Confirm-Action '¿Permite instalar el MSI de prueba?')) { $registerParams.AllowMSI = $true }
+    if ($InteractiveInstaller -and (Confirm-Action '¿Permite abrir el EXE interactivo de prueba?')) { $registerParams.AllowInteractive = $true }
+    & $register @registerParams
     Start-ScheduledTask -TaskName Lanbay-M0-ExecutionContext
     $executionContextStarted = $true
   } else { Write-Host 'Spike de contexto omitido por el usuario.' }

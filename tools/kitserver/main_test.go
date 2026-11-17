@@ -83,10 +83,10 @@ func TestBootstrapOmitsEmptyInstallerArguments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(b, []byte("if ($TestMSI) { $registerArgs += @('-TestMSI', $TestMSI) }")) {
+	if !bytes.Contains(b, []byte("if ($TestMSI) { $registerParams.TestMSI = $TestMSI }")) {
 		t.Fatal("bootstrap must omit an empty MSI argument")
 	}
-	if !bytes.Contains(b, []byte("if ($InteractiveInstaller) { $registerArgs += @('-InteractiveInstaller', $InteractiveInstaller) }")) {
+	if !bytes.Contains(b, []byte("if ($InteractiveInstaller) { $registerParams.InteractiveInstaller = $InteractiveInstaller }")) {
 		t.Fatal("bootstrap must omit an empty interactive-installer argument")
 	}
 }
@@ -113,6 +113,16 @@ func TestBootstrapCollectsEverySpikeReport(t *testing.T) {
 		if !bytes.Contains(b, []byte(fragment)) {
 			t.Fatalf("bootstrap does not collect report fragment %q", fragment)
 		}
+	}
+}
+
+func TestBootstrapUsesNamedSplattingForContextTask(t *testing.T) {
+	b, err := readBootstrap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte("$registerParams = @{ RunnerPath =")) || !bytes.Contains(b, []byte("& $register @registerParams")) {
+		t.Fatal("bootstrap must invoke the registration script with named parameters")
 	}
 }
 
