@@ -32,15 +32,36 @@ function Read-Required([string]$Prompt, [string]$Current) {
 }
 function Write-EnvironmentReport {
   $appInstaller = Get-AppxPackage Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue | Select-Object -First 1
-  [ordered]@{
+  $microSDDriveLetter = if ($MicroSDRoot) { [string]$MicroSDRoot[0] } else { $null }
+  $report = [ordered]@{
     generated_at = (Get-Date).ToUniversalTime().ToString('o')
-    windows = Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, OsBuildNumber, OsLanguage, OsLocale
-    app_installer = if ($appInstaller) { $appInstaller.Version.ToString() } else { $null }
-    winget = try { (& winget --version 2>&1 | Out-String).Trim() } catch { $_.Exception.Message }
+    windows = @(Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, OsBuildNumber, OsLanguage, OsLocale)
+    app_installer = $(if ($appInstaller) { $appInstaller.Version.ToString() } else { $null })
+    winget = $(try { (& winget --version 2>&1 | Out-String).Trim() } catch { $_.Exception.Message })
     powershell_5 = (& powershell.exe -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>$null | Out-String).Trim()
-    powershell_7 = if (Get-Command pwsh.exe -ErrorAction SilentlyContinue) { (& pwsh.exe -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>$null | Out-String).Trim() } else { $null }
-    micro_sd_file_system = if ($MicroSDRoot) { (Get-Volume -DriveLetter $MicroSDRoot.TrimEnd(':','\\') -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FileSystem) } else { $null }
-  } | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 (Join-Path $kitRoot 'out\environment.json')
+    powershell_7 = $(if (Get-Command pwsh.exe -ErrorAction SilentlyContinue) { (& pwsh.exe -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>$null | Out-String).Trim() } else { $null })
+    micro_sd_file_system = $(if ($microSDDriveLetter) { (Get-Volume -DriveLetter $microSDDriveLetter -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FileSystem) } else { $null })
+  }
+  $report | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 (Join-Path $kitRoot 'out\environment.json')
+}
+function Copy-SpikeReports {
+  foreach ($name in @('winget-backend', 'recycle-bin', 'execution-context')) {
+    $source = Join-Path (Join-Path $kitRoot $name) 'out'
+    if (-not (Test-Path -LiteralPath $source)) { continue }
+    $destination = Join-Path (Join-Path $kitRoot 'out') $name
+    New-Item -ItemType Directory -Force -Path $destination | Out-Null
+    Copy-Item -Path (Join-Path $source '*') -Destination $destination -Recurse -Force
+  }
+}
+function Wait-ExecutionContextReport {
+  $report = Join-Path $kitRoot 'execution-context\out\execution-context.json'
+  $deadline = (Get-Date).AddMinutes(5)
+  while (-not (Test-Path -LiteralPath $report) -and (Get-Date) -lt $deadline) {
+    Start-Sleep -Seconds 2
+  }
+  if (-not (Test-Path -LiteralPath $report)) {
+    throw 'El spike de contexto no produjo execution-context.json en cinco minutos.'
+  }
 }
 
 Require-Administrator
@@ -52,6 +73,7 @@ $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInv
 if ($actualHash -ne $kitHash) { throw "El SHA-256 del kit no coincide. Esperado: $kitHash; recibido: $actualHash. No se ejecutó ningún spike." }
 Expand-Archive -LiteralPath $zip -DestinationPath $kitRoot -Force
 New-Item -ItemType Directory -Force -Path (Join-Path $kitRoot 'out') | Out-Null
+$executionContextStarted = $false
 
 if ($NonInteractive) {
   & (Join-Path $kitRoot 'volumes\probe.exe') -out (Join-Path $kitRoot 'out\with-microsd.json')
@@ -70,15 +92,23 @@ if ($NonInteractive) {
     & (Join-Path $kitRoot 'recycle-bin\run.ps1') -Roots @('C:\', $MicroSDRoot)
   } else { Write-Host 'Spike de Papelera omitido por el usuario.' }
 
-  if (Confirm-Action 'El spike de contexto puede instalar el MSI indicado y abrir el instalador interactivo.') {
+  if (Confirm-Action 'El spike de contexto ejecutará comprobaciones sin instalar software.') {
     $register = Join-Path $kitRoot 'execution-context\register-task.ps1'
-    & $register -RunnerPath (Join-Path $kitRoot 'execution-context\runner.exe') -MicroSDRoot ($MicroSDRoot + '\\') -TestMSI $TestMSI -InteractiveInstaller $InteractiveInstaller -AllowInstall -AllowMSI -AllowInteractive
+    $registerArgs = @('-RunnerPath', (Join-Path $kitRoot 'execution-context\runner.exe'), '-MicroSDRoot', ($MicroSDRoot + '\\'))
+    if ($TestMSI) { $registerArgs += @('-TestMSI', $TestMSI) }
+    if ($InteractiveInstaller) { $registerArgs += @('-InteractiveInstaller', $InteractiveInstaller) }
+    if (Confirm-Action '¿Permite instalar el paquete de prueba de winget?') { $registerArgs += '-AllowInstall' }
+    if ($TestMSI -and (Confirm-Action '¿Permite instalar el MSI de prueba?')) { $registerArgs += '-AllowMSI' }
+    if ($InteractiveInstaller -and (Confirm-Action '¿Permite abrir el EXE interactivo de prueba?')) { $registerArgs += '-AllowInteractive' }
+    & $register @registerArgs
     Start-ScheduledTask -TaskName Lanbay-M0-ExecutionContext
-    Start-Sleep -Seconds 20
+    $executionContextStarted = $true
   } else { Write-Host 'Spike de contexto omitido por el usuario.' }
 }
 
+if ($executionContextStarted) { Wait-ExecutionContextReport }
 Write-EnvironmentReport
+Copy-SpikeReports
 $archive = Join-Path $env:TEMP ('lanbay-m0-results-' + (Get-Date -Format 'yyyyMMddHHmmss') + '.zip')
 Compress-Archive -Path (Join-Path $kitRoot 'out\*') -DestinationPath $archive -Force
 Invoke-WebRequest -UseBasicParsing -Method Post -Uri $resultsURL -InFile $archive -ContentType 'application/zip' -Headers @{ 'X-Lanbay-Result-Name' = [IO.Path]::GetFileName($archive) } | Out-Null

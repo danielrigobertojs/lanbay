@@ -3,8 +3,8 @@
 param(
   [Parameter(Mandatory)][string]$RunnerPath,
   [Parameter(Mandatory)][string]$MicroSDRoot,
-  [Parameter(Mandatory)][string]$TestMSI,
-  [Parameter(Mandatory)][string]$InteractiveInstaller,
+  [string]$TestMSI,
+  [string]$InteractiveInstaller,
   [string]$WingetID = '7zip.7zip',
   [switch]$AllowInstall,
   [switch]$AllowMSI,

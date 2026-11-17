@@ -78,6 +78,44 @@ func TestBootstrapAbortsOnHashMismatchBeforeExtraction(t *testing.T) {
 	}
 }
 
+func TestBootstrapOmitsEmptyInstallerArguments(t *testing.T) {
+	b, err := readBootstrap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte("if ($TestMSI) { $registerArgs += @('-TestMSI', $TestMSI) }")) {
+		t.Fatal("bootstrap must omit an empty MSI argument")
+	}
+	if !bytes.Contains(b, []byte("if ($InteractiveInstaller) { $registerArgs += @('-InteractiveInstaller', $InteractiveInstaller) }")) {
+		t.Fatal("bootstrap must omit an empty interactive-installer argument")
+	}
+}
+
+func TestBootstrapReadsMicroSDDriveLetterWithoutTrimEnd(t *testing.T) {
+	b, err := readBootstrap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(b, []byte("TrimEnd")) {
+		t.Fatal("bootstrap must not pass a multi-character trim argument to PowerShell")
+	}
+	if !bytes.Contains(b, []byte("$microSDDriveLetter = if ($MicroSDRoot) { [string]$MicroSDRoot[0] } else { $null }")) {
+		t.Fatal("bootstrap must derive the drive letter without trimming path characters")
+	}
+}
+
+func TestBootstrapCollectsEverySpikeReport(t *testing.T) {
+	b, err := readBootstrap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{"function Copy-SpikeReports", "'winget-backend', 'recycle-bin', 'execution-context'", "Copy-SpikeReports"} {
+		if !bytes.Contains(b, []byte(fragment)) {
+			t.Fatalf("bootstrap does not collect report fragment %q", fragment)
+		}
+	}
+}
+
 func TestResultsStoredUnmodified(t *testing.T) {
 	s := testServer(t, 1024)
 	body := []byte{0, 1, 2, 3, 255, 0}
@@ -123,5 +161,27 @@ func TestRunStopsAfterInactivity(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("server did not stop after inactivity")
+	}
+}
+
+func TestAddressesForInterfacePrefersPrivateIPv4(t *testing.T) {
+	addresses := []net.Addr{
+		&net.IPNet{IP: net.ParseIP("fe80::1"), Mask: net.CIDRMask(64, 128)},
+		&net.IPNet{IP: net.ParseIP("192.168.1.20"), Mask: net.CIDRMask(24, 32)},
+	}
+	v4, v6 := addressesForInterface(net.Interface{Name: "en0"}, addresses)
+	if v4 == nil || !v4.IP.Equal(net.ParseIP("192.168.1.20")) {
+		t.Fatalf("IPv4 = %#v", v4)
+	}
+	if v6 != nil {
+		t.Fatalf("IPv6 fallback = %#v", v6)
+	}
+}
+
+func TestAddressesForInterfaceScopesLinkLocalIPv6(t *testing.T) {
+	addresses := []net.Addr{&net.IPNet{IP: net.ParseIP("fe80::1"), Mask: net.CIDRMask(64, 128)}}
+	v4, v6 := addressesForInterface(net.Interface{Name: "en0"}, addresses)
+	if v4 != nil || v6 == nil || v6.Zone != "en0" {
+		t.Fatalf("addresses = %#v %#v", v4, v6)
 	}
 }
