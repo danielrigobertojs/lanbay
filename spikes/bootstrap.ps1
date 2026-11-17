@@ -73,7 +73,9 @@ if ($NonInteractive) {
 
   if (Confirm-Action 'El spike de contexto ejecutará comprobaciones sin instalar software.') {
     $register = Join-Path $kitRoot 'execution-context\register-task.ps1'
-    $registerArgs = @('-RunnerPath', (Join-Path $kitRoot 'execution-context\runner.exe'), '-MicroSDRoot', ($MicroSDRoot + '\\'), '-TestMSI', $TestMSI, '-InteractiveInstaller', $InteractiveInstaller)
+    $registerArgs = @('-RunnerPath', (Join-Path $kitRoot 'execution-context\runner.exe'), '-MicroSDRoot', ($MicroSDRoot + '\\'))
+    if ($TestMSI) { $registerArgs += @('-TestMSI', $TestMSI) }
+    if ($InteractiveInstaller) { $registerArgs += @('-InteractiveInstaller', $InteractiveInstaller) }
     if (Confirm-Action '¿Permite instalar el paquete de prueba de winget?') { $registerArgs += '-AllowInstall' }
     if ($TestMSI -and (Confirm-Action '¿Permite instalar el MSI de prueba?')) { $registerArgs += '-AllowMSI' }
     if ($InteractiveInstaller -and (Confirm-Action '¿Permite abrir el EXE interactivo de prueba?')) { $registerArgs += '-AllowInteractive' }

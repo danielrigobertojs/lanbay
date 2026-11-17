@@ -78,6 +78,19 @@ func TestBootstrapAbortsOnHashMismatchBeforeExtraction(t *testing.T) {
 	}
 }
 
+func TestBootstrapOmitsEmptyInstallerArguments(t *testing.T) {
+	b, err := readBootstrap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte("if ($TestMSI) { $registerArgs += @('-TestMSI', $TestMSI) }")) {
+		t.Fatal("bootstrap must omit an empty MSI argument")
+	}
+	if !bytes.Contains(b, []byte("if ($InteractiveInstaller) { $registerArgs += @('-InteractiveInstaller', $InteractiveInstaller) }")) {
+		t.Fatal("bootstrap must omit an empty interactive-installer argument")
+	}
+}
+
 func TestResultsStoredUnmodified(t *testing.T) {
 	s := testServer(t, 1024)
 	body := []byte{0, 1, 2, 3, 255, 0}
