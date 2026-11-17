@@ -1,4 +1,5 @@
 dist/
+m0-results/
 node_modules/
 web/node_modules/
 web/.svelte-kit/

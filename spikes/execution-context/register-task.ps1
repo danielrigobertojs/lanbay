@@ -6,7 +6,9 @@ param(
   [Parameter(Mandatory)][string]$TestMSI,
   [Parameter(Mandatory)][string]$InteractiveInstaller,
   [string]$WingetID = '7zip.7zip',
-  [switch]$AllowInstall
+  [switch]$AllowInstall,
+  [switch]$AllowMSI,
+  [switch]$AllowInteractive
 )
 $ErrorActionPreference = 'Stop'
 $scriptDir = Split-Path -Parent $PSCommandPath
@@ -15,6 +17,8 @@ New-Item -ItemType Directory -Force -Path $out | Out-Null
 $arguments = @('-out', (Join-Path $out 'execution-context.json'), '-micro-sd', $MicroSDRoot,
   '-test-msi', $TestMSI, '-interactive-installer', $InteractiveInstaller, '-winget-id', $WingetID)
 if ($AllowInstall) { $arguments += '-allow-install' }
+if ($AllowMSI) { $arguments += '-allow-msi' }
+if ($AllowInteractive) { $arguments += '-allow-interactive' }
 $quoted = $arguments | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }
 $action = New-ScheduledTaskAction -Execute $RunnerPath -Argument ($quoted -join ' ')
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
