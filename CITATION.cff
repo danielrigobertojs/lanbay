@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use Lanbay, please cite it as below."
+title: "Lanbay"
+version: "0.0.0"
+date-released: 2026-11-17
+license: Apache-2.0
+authors:
+  - family-names: Jacobo Sandoval
+    given-names: Daniel Rigoberto
+repository-code: "https://github.com/danielrigobertojs/lanbay"
