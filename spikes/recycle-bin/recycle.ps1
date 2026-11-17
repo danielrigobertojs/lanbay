@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+param([Parameter(Mandatory)][string]$Path)
+$source = @'
+using System; using System.Runtime.InteropServices;
+[ComImport, Guid("947AAB5F-0A5C-4C13-B4D6-4BF7836FC9F8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IFileOperation { void Advise(IntPtr p, out uint c); void Unadvise(uint c); void SetOperationFlags(uint f); void SetProgressMessage([MarshalAs(UnmanagedType.LPWStr)] string s); void SetProgressDialog(IntPtr p); void SetProperties(IntPtr p); void SetOwnerWindow(uint w); void ApplyPropertiesToItem(IntPtr i); void ApplyPropertiesToItems(IntPtr i); void RenameItem(IntPtr i,[MarshalAs(UnmanagedType.LPWStr)]string n,IntPtr p); void RenameItems(IntPtr i,[MarshalAs(UnmanagedType.LPWStr)]string n); void MoveItem(IntPtr i,IntPtr d,[MarshalAs(UnmanagedType.LPWStr)]string n,IntPtr p); void MoveItems(IntPtr i,IntPtr d); void CopyItem(IntPtr i,IntPtr d,[MarshalAs(UnmanagedType.LPWStr)]string n,IntPtr p); void CopyItems(IntPtr i,IntPtr d); void DeleteItem(IntPtr i,IntPtr p); void DeleteItems(IntPtr i); void NewItem(IntPtr d,uint a,[MarshalAs(UnmanagedType.LPWStr)]string n,[MarshalAs(UnmanagedType.LPWStr)]string t,IntPtr p); void PerformOperations(); [return: MarshalAs(UnmanagedType.Bool)] bool GetAnyOperationsAborted(); }
+public class RecycleProbe { [DllImport("shell32.dll", CharSet=CharSet.Unicode)] static extern int SHCreateItemFromParsingName(string p,IntPtr b,ref Guid i,out IntPtr o); public static string Delete(string path) { var t=Type.GetTypeFromCLSID(new Guid("3AD05575-8857-4850-9277-11B85BDB8E09")); var op=(IFileOperation)Activator.CreateInstance(t); Guid iid=new Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"); IntPtr item; int hr=SHCreateItemFromParsingName(path,IntPtr.Zero,ref iid,out item); if(hr!=0)return "SHCreateItem="+hr; op.SetOperationFlags(0x00080000); op.DeleteItem(item,IntPtr.Zero); op.PerformOperations(); return "aborted="+op.GetAnyOperationsAborted(); } }
+'@
+Add-Type -TypeDefinition $source -ErrorAction Stop
+[RecycleProbe]::Delete($Path)
