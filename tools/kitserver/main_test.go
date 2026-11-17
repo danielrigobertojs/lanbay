@@ -126,6 +126,18 @@ func TestBootstrapUsesNamedSplattingForContextTask(t *testing.T) {
 	}
 }
 
+func TestBootstrapNormalizesMicroSDRoot(t *testing.T) {
+	b, err := readBootstrap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{"function Normalize-VolumeRoot", "return ([string]$value[0]).ToUpperInvariant() + ':\\'", "$MicroSDRoot = Normalize-VolumeRoot"} {
+		if !bytes.Contains(b, []byte(fragment)) {
+			t.Fatalf("bootstrap does not normalize microSD root with %q", fragment)
+		}
+	}
+}
+
 func TestResultsStoredUnmodified(t *testing.T) {
 	s := testServer(t, 1024)
 	body := []byte{0, 1, 2, 3, 255, 0}
