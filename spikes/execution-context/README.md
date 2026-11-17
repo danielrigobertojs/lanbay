@@ -35,7 +35,9 @@ interactivo y `Get-ScheduledTask ... | Format-List *`. El informe registra
 identidad, elevación, sesión, búsqueda/instalación winget, MSI y escritura
 efímera en `C:\` y microSD. El paquete winget por defecto es `7zip.7zip`; si
 ya existe, el informe lo dice. Cambie `-WingetID` por un paquete de prueba que
-pueda eliminarse. La instalación requiere `-AllowInstall` en el script.
+pueda eliminarse. La instalación winget requiere `-AllowInstall`; el MSI
+requiere además `-AllowMSI` y el EXE interactivo `-AllowInteractive`. El
+bootstrap pide una confirmación explícita antes de pasar esos permisos.
 
 ## Limpieza
 

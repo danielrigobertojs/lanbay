@@ -66,6 +66,8 @@ func main() {
 	interactive := flag.String("interactive-installer", "", "")
 	id := flag.String("winget-id", "7zip.7zip", "")
 	allow := flag.Bool("allow-install", false, "")
+	allowMSI := flag.Bool("allow-msi", false, "")
+	allowInteractive := flag.Bool("allow-interactive", false, "")
 	flag.Parse()
 	r := report{GeneratedAt: time.Now().UTC(), OS: runtime.GOOS, User: os.Getenv("USERNAME")}
 	r.Elevation = run("whoami", "/groups")
@@ -75,15 +77,15 @@ func main() {
 	} else {
 		r.WingetInstall = result{Command: "not run: pass -allow-install", ExitCode: -1}
 	}
-	if *msi != "" {
+	if *msi != "" && *allowMSI {
 		r.MSI = run("msiexec.exe", "/i", *msi, "/qn", "/norestart", "/l*v", filepath.Join(filepath.Dir(*out), "msi.log"))
 	} else {
-		r.MSI = result{Command: "not run: -test-msi required", ExitCode: -1}
+		r.MSI = result{Command: "not run: pass -test-msi and -allow-msi", ExitCode: -1}
 	}
-	if *interactive != "" {
+	if *interactive != "" && *allowInteractive {
 		r.Interactive = run("cmd.exe", "/c", "start", "\"Lanbay M0 interactive\"", *interactive)
 	} else {
-		r.Interactive = result{Command: "not run: -interactive-installer required", ExitCode: -1}
+		r.Interactive = result{Command: "not run: pass -interactive-installer and -allow-interactive", ExitCode: -1}
 	}
 	r.WriteC = writeProbe(`C:\`)
 	if *sd != "" {
