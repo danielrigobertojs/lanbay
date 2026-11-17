@@ -138,6 +138,16 @@ func TestBootstrapNormalizesMicroSDRoot(t *testing.T) {
 	}
 }
 
+func TestTaskRegistrationDoesNotQuoteSimpleVolumeRoots(t *testing.T) {
+	b, err := os.ReadFile("../../spikes/execution-context/register-task.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte("if ($Argument -notmatch '[\\s\"]') { return $Argument }")) {
+		t.Fatal("task registration must leave simple volume roots unquoted")
+	}
+}
+
 func TestResultsStoredUnmodified(t *testing.T) {
 	s := testServer(t, 1024)
 	body := []byte{0, 1, 2, 3, 255, 0}
