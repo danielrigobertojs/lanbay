@@ -129,6 +129,8 @@ func (s *Server) password(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 400)
 		return
 	}
+	cookie, _ := r.Cookie(auth.CookieName)
+	s.auth.CompletePasswordChange(cookie.Value)
 	s.audit(r, "password_change", "ok")
 	w.WriteHeader(http.StatusNoContent)
 }

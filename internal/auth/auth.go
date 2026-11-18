@@ -131,6 +131,20 @@ func (m *Manager) Check(id, csrf string, mutating bool) (bool, bool) {
 	return true, s.changeRequired
 }
 func (m *Manager) Logout(id string) { m.mu.Lock(); defer m.mu.Unlock(); delete(m.sessions, id) }
+
+// CompletePasswordChange lets the current session proceed after changing its
+// first-run password.
+func (m *Manager) CompletePasswordChange(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[id]
+	if !ok {
+		return
+	}
+	s.changeRequired = false
+	m.sessions[id] = s
+}
+
 func verify(encoded, password string) bool {
 	parts := strings.Split(encoded, ":")
 	if len(parts) != 2 {

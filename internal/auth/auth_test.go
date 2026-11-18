@@ -48,3 +48,22 @@ func TestRateLimit(t *testing.T) {
 		t.Fatal("rate limit missing")
 	}
 }
+
+func TestCompletePasswordChange(t *testing.T) {
+	m := manager(t)
+	initial, err := m.EnsurePassword(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, csrf, required, err := m.Login(context.Background(), netip.MustParseAddr("10.0.0.5"), initial)
+	if err != nil || !required {
+		t.Fatalf("first login = %q, %t, %v", id, required, err)
+	}
+	if err := m.SetPassword(context.Background(), "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	m.CompletePasswordChange(id)
+	if ok, stillRequired := m.Check(id, csrf, false); !ok || stillRequired {
+		t.Fatalf("session after password change = %t, %t", ok, stillRequired)
+	}
+}
