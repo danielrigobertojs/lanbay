@@ -1,0 +1,21 @@
+{
+  "generated_at": "2026-11-18T20:44:04.8715542Z",
+  "results": [
+    {
+      "root": "C:\\",
+      "file_system": "unknown",
+      "recycle_directory_present": true,
+      "powershell_exit": 0,
+      "output": "aborted=False\r\n",
+      "file_gone": true
+    },
+    {
+      "root": "D:\\",
+      "file_system": "unknown",
+      "recycle_directory_present": false,
+      "powershell_exit": 0,
+      "output": "aborted=False\r\n",
+      "file_gone": true
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "generated_at": "2026-11-18T20:44:12.2582331Z",
+  "os": "windows",
+  "user": "<redactado>",
+  "elevation": {
+    "command": "whoami /groups",
+    "exit_code": 0,
+    "duration_ms": 57,
+    "output": "\r\nINFORMACI�N DE GRUPO\r\n--------------------\r\n\r\nNombre de grupo                                                  Tipo           SID                                                                                                          Atributos                                                                                     \r\n================================================================ ============== ============================================================================================================ ==============================================================================================\r\nEtiqueta obligatoria\\Nivel obligatorio alto                      Etiqueta       S-1-16-12288                                                                                                                                                                                               \r\nTodos                                                            Grupo conocido S-1-1-0                                                                                                      Grupo obligatorio, Habilitado de manera predeterminada, Grupo habilitado                      \r\nNT AUTHORITY\\Cuenta local y miembro del grupo de administradores Grupo conocido S-1-5-114                                                                                                    Grupo obligatorio, Habilitado de manera predeterminada, Grupo habilitado                      \r\nBUILTIN\\Administradores                                          Alias          S-1-5-32-544                                                                                                 Grupo obligatorio, Habilitado de manera predeterminada, Grupo habilitado, Propietario de grupo\r\nBUILTIN\\Usuarios                                                 Alias          S-1-5-32-545                                                                                                 Grupo obligatorio, Habilitado de manera predeterminada, Grupo habilitado                      \r\nNT AUTHORITY\\INTERACTIVE                                         Grupo conocido S-1-5-4                                                                                                      Grupo obligatorio, Habilitado de manera predeterminada, Grupo habilitado                      \r\nINICIO DE SESI�N EN LA CONSOLA                                   Grupo conocido S-1-2-1                                                                                                      Grupo obligatorio, Habilitado de manera predeterminada, Grupo habilitado                      \r\nNT AUTHORITY\\Usuarios autentificados                             Grupo conocido S-1-5-11                                                                                                     Grupo obligatorio, Habilitado de manera predeterminada, Grupo habilitado                      \r\nNT AUTHORITY\\Esta compa��a                                       Grupo conocido S-1-5-15                                                                                                     Grupo obligatorio, Habilitado de manera predeterminada, Grupo habilitado                      \r\nMicrosoftAccount\\<redactado>                                     Usuario        S-1-11-96-<redactado>                                                                                        Grupo obligatorio, Habilitado de manera predeterminada, Grupo habilitado                      \r\nNT AUTHORITY\\Cuenta local                                        Grupo conocido S-1-5-113                                                                                                    Grupo obligatorio, Habilitado de manera predeterminada, Grupo habilitado                      \r\nLOCAL                                                            Grupo conocido S-1-2-0                                                                                                      Grupo obligatorio, Habilitado de manera predeterminada, Grupo habilitado                      \r\nNT AUTHORITY\\Autenticaci�n de cuentas en la nube                 Grupo conocido S-1-5-64-36                                                                                                  Grupo obligatorio, Habilitado de manera predeterminada, Grupo habilitado                      \r\n"
+  },
+  "winget_search": {
+    "command": "winget search --id 7zip.7zip --exact --source winget",
+    "exit_code": 0,
+    "duration_ms": 361,
+    "output": "Name  Id        Version\r\n-----------------------\r\n7-Zip 7zip.7zip 26.06\r\n"
+  },
+  "winget_install": {
+    "command": "winget install --id 7zip.7zip --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity",
+    "exit_code": 0,
+    "duration_ms": 6587,
+    "output": "Found 7-Zip [7zip.7zip] Version 26.06\r\nThis application is licensed to you by its owner.\r\nMicrosoft is not responsible for, nor does it grant any licenses to, third-party packages.\r\nDownloading https://github.com/ip7z/7zip/releases/download/26.06/7z2606-x64.msi\r\nSuccessfully verified installer hash\r\nStarting package install...\r\nSuccessfully installed\r\n"
+  },
+  "msi": {
+    "command": "not run: pass -test-msi and -allow-msi",
+    "exit_code": -1,
+    "duration_ms": 0,
+    "output": ""
+  },
+  "interactive_installer": {
+    "command": "not run: pass -interactive-installer and -allow-interactive",
+    "exit_code": -1,
+    "duration_ms": 0,
+    "output": ""
+  },
+  "write_c": {
+    "command": "write/remove C:\\lanbay-m0-write-probe.tmp",
+    "exit_code": 0,
+    "duration_ms": 0,
+    "output": "ok"
+  },
+  "write_micro_sd": {
+    "command": "write/remove D:\\lanbay-m0-write-probe.tmp",
+    "exit_code": 0,
+    "duration_ms": 27,
+    "output": "ok"
+  }
+}
