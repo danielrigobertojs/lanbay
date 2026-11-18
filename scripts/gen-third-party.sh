@@ -11,8 +11,10 @@ go_license() {
   local module_dir license_file
 
   module_dir=$(go list -m -f '{{.Dir}}' "${module}@${version}")
+  # Pick the module's own LICENSE/COPYING file deterministically (sorted so
+  # that "LICENSE" wins over "LICENSE-3RD-PARTY", "LICENSE-SQLITE", etc.).
   license_file=$(find "$module_dir" -maxdepth 1 -type f \
-    \( -iname 'license*' -o -iname 'copying*' \) -print -quit)
+    \( -iname 'license*' -o -iname 'copying*' \) -print | sort | head -n1)
 
   if [[ -z "$license_file" ]]; then
     printf 'ERROR: no license file found for %s %s\n' "$module" "$version" >&2
