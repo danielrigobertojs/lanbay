@@ -1,0 +1,17 @@
+﻿{
+    "generated_at":  "2026-11-18T20:44:10.7463969Z",
+    "windows":  [
+                    {
+                        "WindowsProductName":  "Windows 10 Home",
+                        "WindowsVersion":  "2009",
+                        "OsBuildNumber":  "26300",
+                        "OsLanguage":  "es-ES",
+                        "OsLocale":  "es-ES"
+                    }
+                ],
+    "app_installer":  "1.29.379.0",
+    "winget":  "v1.29.380",
+    "powershell_5":  "5.1.26100.9818",
+    "powershell_7":  null,
+    "micro_sd_file_system":  "FAT32"
+}

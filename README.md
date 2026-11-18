@@ -51,6 +51,7 @@ alternative, cleanup, and the Windows-device evidence still required.
 
 - `modernc.org/sqlite`: pure-Go SQLite driver.
 - `golang.org/x/sys/windows`: Windows API bindings.
+- `golang.org/x/crypto/argon2`: memory-hard administrator password hashing.
 - Svelte: compiled local web UI.
 
 Complete generated attribution is in `THIRD_PARTY_LICENSES.md` and is named by

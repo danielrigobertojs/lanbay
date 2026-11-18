@@ -5,6 +5,37 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
+go_license() {
+  local module=$1
+  local version=$2
+  local module_dir license_file
+
+  module_dir=$(go list -m -f '{{.Dir}}' "${module}@${version}")
+  # Pick the module's own LICENSE/COPYING file deterministically (sorted so
+  # that "LICENSE" wins over "LICENSE-3RD-PARTY", "LICENSE-SQLITE", etc.).
+  license_file=$(find "$module_dir" -maxdepth 1 -type f \
+    \( -iname 'license*' -o -iname 'copying*' \) -print | sort | head -n1)
+
+  if [[ -z "$license_file" ]]; then
+    printf 'ERROR: no license file found for %s %s\n' "$module" "$version" >&2
+    return 1
+  fi
+
+  if grep -Eqi 'Apache License[[:space:]]*,?[[:space:]]*Version 2\.0' "$license_file"; then
+    printf 'Apache-2.0'
+  elif grep -Eqi 'MIT License|Permission is hereby granted, free of charge, to any person obtaining a copy' "$license_file"; then
+    printf 'MIT'
+  elif grep -Eqi 'Redistribution and use in source and binary forms' "$license_file" && \
+       grep -Eqi 'Neither the name' "$license_file"; then
+    printf 'BSD-3-Clause'
+  elif grep -Eqi 'Redistribution and use in source and binary forms' "$license_file"; then
+    printf 'BSD-2-Clause'
+  else
+    printf 'ERROR: unsupported or unknown license for %s %s (%s)\n' "$module" "$version" "$license_file" >&2
+    return 1
+  fi
+}
+
 {
   echo '# Third-party licenses'
   echo
@@ -12,8 +43,12 @@ cd "$root"
   echo
   echo '## Go modules'
   echo
-  go list -m -f '{{if not .Main}}{{.Path}} {{.Version}}{{end}}' all | sed '/^$/d' | sort | while read -r module version; do
-    printf -- '- `%s` %s — license: consult the module distribution.\n' "$module" "$version"
+  echo 'Modules reachable from production Go packages for the Windows amd64 build; test-only modules are excluded.'
+  echo
+  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go list -deps \
+    -f '{{with .Module}}{{if not .Main}}{{.Path}} {{.Version}}{{end}}{{end}}' \
+    ./cmd/lanbay ./internal/... | sed '/^$/d' | sort -u | while read -r module version; do
+    printf -- '- `%s` %s — SPDX: %s.\n' "$module" "$version" "$(go_license "$module" "$version")"
   done
   echo
   echo '## npm packages embedded in the frontend'
@@ -23,7 +58,10 @@ import lock from './web/package-lock.json' with { type: 'json' }
 const root = lock.packages[''] ?? {}
 for (const [name, version] of Object.entries(root.dependencies ?? {}).sort(([a], [b]) => a.localeCompare(b))) {
   const pkg = lock.packages[`node_modules/${name}`]
-  console.log(`- \`${name}\` ${pkg?.version ?? version} — license: ${pkg?.license ?? 'see package metadata'}.`)
+  if (!pkg?.license) {
+    throw new Error(`unknown license for npm package ${name}`)
+  }
+  console.log(`- \`${name}\` ${pkg.version ?? version} — SPDX: ${pkg.license}.`)
 }
 NODE
 } > THIRD_PARTY_LICENSES.md

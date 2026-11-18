@@ -20,5 +20,10 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping sqlite database: %w", err)
 	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, ip TEXT NOT NULL, action TEXT NOT NULL, result TEXT NOT NULL);`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate database: %w", err)
+	}
 	return db, nil
 }

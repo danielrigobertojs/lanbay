@@ -83,10 +83,10 @@ func TestBootstrapOmitsEmptyInstallerArguments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(b, []byte("if ($TestMSI) { $registerArgs += @('-TestMSI', $TestMSI) }")) {
+	if !bytes.Contains(b, []byte("if ($TestMSI) { $registerParams.TestMSI = $TestMSI }")) {
 		t.Fatal("bootstrap must omit an empty MSI argument")
 	}
-	if !bytes.Contains(b, []byte("if ($InteractiveInstaller) { $registerArgs += @('-InteractiveInstaller', $InteractiveInstaller) }")) {
+	if !bytes.Contains(b, []byte("if ($InteractiveInstaller) { $registerParams.InteractiveInstaller = $InteractiveInstaller }")) {
 		t.Fatal("bootstrap must omit an empty interactive-installer argument")
 	}
 }
@@ -113,6 +113,38 @@ func TestBootstrapCollectsEverySpikeReport(t *testing.T) {
 		if !bytes.Contains(b, []byte(fragment)) {
 			t.Fatalf("bootstrap does not collect report fragment %q", fragment)
 		}
+	}
+}
+
+func TestBootstrapUsesNamedSplattingForContextTask(t *testing.T) {
+	b, err := readBootstrap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte("$registerParams = @{ RunnerPath =")) || !bytes.Contains(b, []byte("& $register @registerParams")) {
+		t.Fatal("bootstrap must invoke the registration script with named parameters")
+	}
+}
+
+func TestBootstrapNormalizesMicroSDRoot(t *testing.T) {
+	b, err := readBootstrap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{"function Normalize-VolumeRoot", "return ([string]$value[0]).ToUpperInvariant() + ':\\'", "$MicroSDRoot = Normalize-VolumeRoot"} {
+		if !bytes.Contains(b, []byte(fragment)) {
+			t.Fatalf("bootstrap does not normalize microSD root with %q", fragment)
+		}
+	}
+}
+
+func TestTaskRegistrationDoesNotQuoteSimpleVolumeRoots(t *testing.T) {
+	b, err := os.ReadFile("../../spikes/execution-context/register-task.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte("if ($Argument -notmatch '[\\s\"]') { return $Argument }")) {
+		t.Fatal("task registration must leave simple volume roots unquoted")
 	}
 }
 
