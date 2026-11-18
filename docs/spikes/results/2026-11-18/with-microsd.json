@@ -1,0 +1,24 @@
+{
+  "generated_at": "2026-11-18T20:43:20.9930828Z",
+  "reparse_path": "",
+  "volumes": [
+    {
+      "root": "C:\\",
+      "drive_type": 3,
+      "label": "OS",
+      "file_system": "NTFS",
+      "serial": 1923254353,
+      "dos_device": "\\Device\\HarddiskVolume3",
+      "candidate_local": true
+    },
+    {
+      "root": "D:\\",
+      "drive_type": 2,
+      "label": "SD-32GB",
+      "file_system": "FAT32",
+      "serial": 2854272307,
+      "dos_device": "\\Device\\HarddiskVolume6",
+      "candidate_local": true
+    }
+  ]
+}

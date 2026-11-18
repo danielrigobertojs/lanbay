@@ -1,0 +1,15 @@
+{
+  "generated_at": "2026-11-18T20:43:34.4116889Z",
+  "reparse_path": "",
+  "volumes": [
+    {
+      "root": "C:\\",
+      "drive_type": 3,
+      "label": "OS",
+      "file_system": "NTFS",
+      "serial": 1923254353,
+      "dos_device": "\\Device\\HarddiskVolume3",
+      "candidate_local": true
+    }
+  ]
+}
