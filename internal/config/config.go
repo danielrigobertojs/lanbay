@@ -33,6 +33,7 @@ type Config struct {
 	SessionIdle      time.Duration
 	DiskAlertPercent int
 	AllowedHosts     []string
+	ProtectedPaths   []string
 }
 
 func Default(dataDir string) Config {
@@ -119,6 +120,8 @@ func Load(dataDir string) (Config, error) {
 			c.AllowedNetworks = prefixes
 		case "allowed_hosts":
 			c.AllowedHosts = splitStrings(value)
+		case "protected_paths":
+			c.ProtectedPaths = splitStrings(value)
 		}
 	}
 	return c, nil
@@ -136,7 +139,11 @@ func Save(c Config) error {
 	for _, host := range c.AllowedHosts {
 		hosts = append(hosts, "\""+host+"\"")
 	}
-	content := fmt.Sprintf("listen = %q\ncertificate_file = %q\nkey_file = %q\nsession_idle_hours = %d\ndisk_alert_percent = %d\nallowed_networks = [%s]\nallowed_hosts = [%s]\n", c.Listen, c.CertificateFile, c.KeyFile, int(c.SessionIdle.Hours()), c.DiskAlertPercent, strings.Join(prefixes, ", "), strings.Join(hosts, ", "))
+	protected := make([]string, 0, len(c.ProtectedPaths))
+	for _, path := range c.ProtectedPaths {
+		protected = append(protected, "\""+path+"\"")
+	}
+	content := fmt.Sprintf("listen = %q\ncertificate_file = %q\nkey_file = %q\nsession_idle_hours = %d\ndisk_alert_percent = %d\nallowed_networks = [%s]\nallowed_hosts = [%s]\nprotected_paths = [%s]\n", c.Listen, c.CertificateFile, c.KeyFile, int(c.SessionIdle.Hours()), c.DiskAlertPercent, strings.Join(prefixes, ", "), strings.Join(hosts, ", "), strings.Join(protected, ", "))
 	return os.WriteFile(filepath.Join(c.DataDir, fileName), []byte(content), 0600)
 }
 func splitStrings(value string) []string {

@@ -11,6 +11,7 @@ import (
 	"github.com/danielrigobertojs/lanbay/internal/config"
 	"github.com/danielrigobertojs/lanbay/internal/files"
 	"github.com/danielrigobertojs/lanbay/internal/pathguard"
+	"github.com/danielrigobertojs/lanbay/internal/platform"
 	"github.com/danielrigobertojs/lanbay/internal/volumes"
 	lanbayweb "github.com/danielrigobertojs/lanbay/internal/web"
 	"log/slog"
@@ -22,6 +23,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -31,6 +33,7 @@ type Server struct {
 	volumes volumes.Provider
 	db      *sql.DB
 	version string
+	auditMu sync.Mutex
 }
 
 func New(c config.Config, db *sql.DB, provider volumes.Provider, version string) *Server {
@@ -121,7 +124,11 @@ func (s *Server) fileManager(ctx context.Context) (files.Manager, error) {
 	for _, v := range vs {
 		roots = append(roots, v.ID)
 	}
-	return files.Manager{Guard: pathguard.Guard{Roots: roots, Protected: []string{s.config.DataDir}}, Trash: files.NewTrash()}, nil
+	protected, err := platform.ProtectedPaths(s.config.DataDir, s.config.ProtectedPaths)
+	if err != nil {
+		return files.Manager{}, err
+	}
+	return files.Manager{Guard: pathguard.Guard{Roots: roots, Protected: protected}, Trash: files.NewTrash()}, nil
 }
 func (s *Server) fileList(w http.ResponseWriter, r *http.Request) {
 	if !s.session(w, r, false) {
@@ -419,6 +426,10 @@ func remoteIP(r *http.Request) netip.Addr {
 }
 func hostname() string { h, _ := os.Hostname(); return h }
 func (s *Server) audit(r *http.Request, action, result string) {
+	// SQLite accepts one writer at a time. Audit records are security evidence,
+	// so concurrent requests must not silently lose one to a busy writer.
+	s.auditMu.Lock()
+	defer s.auditMu.Unlock()
 	if _, err := s.db.ExecContext(r.Context(), "INSERT INTO audit_log(created_at,ip,action,result) VALUES(?,?,?,?)", time.Now().UTC().Format(time.RFC3339), remoteIP(r).String(), action, result); err != nil {
 		slog.Error("write audit record", "action", action, "result", result, "error", err)
 	}

@@ -4,18 +4,25 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"github.com/danielrigobertojs/lanbay/internal/auth"
 	"github.com/danielrigobertojs/lanbay/internal/config"
+	"github.com/danielrigobertojs/lanbay/internal/pathguard"
 	"github.com/danielrigobertojs/lanbay/internal/store"
 	"github.com/danielrigobertojs/lanbay/internal/volumes"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 )
+
+type fixedVolumes []volumes.Volume
+
+func (v fixedVolumes) List(context.Context) ([]volumes.Volume, error) { return v, nil }
 
 func TestAllowedIP(t *testing.T) {
 	networks := config.DefaultNetworks()
@@ -41,6 +48,30 @@ func TestRecycleAvailable(t *testing.T) {
 	}
 	if recycleAvailable(`E:\\file.txt`, items) {
 		t.Fatal("unknown volume must fail closed")
+	}
+}
+
+func TestFileManagerProtectsConfiguredZones(t *testing.T) {
+	root := t.TempDir()
+	data := filepath.Join(root, "data")
+	protected := filepath.Join(root, "protected")
+	for _, path := range []string{data, protected} {
+		if err := os.Mkdir(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := config.Default(data)
+	c.ProtectedPaths = []string{protected}
+	s := New(c, nil, fixedVolumes{{ID: root}}, "test")
+	m, err := s.fileManager(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Guard.Check(protected, true); !errors.Is(err, pathguard.ErrProtected) {
+		t.Fatalf("write to configured protected zone = %v", err)
+	}
+	if _, err := m.Guard.Check(root, true); !errors.Is(err, pathguard.ErrRoot) {
+		t.Fatalf("write to volume root = %v", err)
 	}
 }
 
