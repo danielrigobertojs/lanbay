@@ -54,13 +54,13 @@ func TestDeleteFailsClosedWithoutRecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := Service{Guard: pathguard.Guard{Roots: []string{root}}}
-	if err := s.Delete(context.Background(), path, false); !errors.Is(err, ErrRecycleUnavailable) {
+	if err := s.Delete(context.Background(), path, DeleteOptions{}); !errors.Is(err, ErrRecycleUnavailable) {
 		t.Fatalf("delete=%v", err)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("file removed: %v", err)
 	}
-	if err := s.Delete(context.Background(), path, true); err != nil {
+	if err := s.Delete(context.Background(), path, DeleteOptions{Permanent: true}); err != nil {
 		t.Fatal(err)
 	}
 }

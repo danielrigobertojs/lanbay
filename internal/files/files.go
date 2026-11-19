@@ -22,6 +22,10 @@ var ErrRecycleUnavailable = errors.New("recycle_unavailable")
 type Trash interface {
 	Delete(context.Context, string) error
 }
+type DeleteOptions struct {
+	Permanent bool
+	Recycle   bool
+}
 
 type Entry struct {
 	Name      string    `json:"name"`
@@ -170,7 +174,7 @@ func (m Manager) CopyFile(ctx context.Context, source, parent, name string) (str
 	}
 	return dst, copyPath(ctx, src, dst)
 }
-func (m Manager) Delete(ctx context.Context, source string, permanent bool) error {
+func (m Manager) Delete(ctx context.Context, source string, options DeleteOptions) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -178,8 +182,8 @@ func (m Manager) Delete(ctx context.Context, source string, permanent bool) erro
 	if err != nil {
 		return err
 	}
-	if !permanent {
-		if m.Trash == nil {
+	if !options.Permanent {
+		if !options.Recycle || m.Trash == nil {
 			return ErrRecycleUnavailable
 		}
 		return m.Trash.Delete(ctx, p)

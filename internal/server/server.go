@@ -218,13 +218,26 @@ func (s *Server) fileDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	m, e := s.fileManager(r.Context())
 	if e == nil {
-		e = m.Delete(r.Context(), in.Path, in.Permanent)
+		volumes, listErr := s.volumes.List(r.Context())
+		if listErr != nil {
+			e = listErr
+		} else {
+			e = m.Delete(r.Context(), in.Path, files.DeleteOptions{Permanent: in.Permanent, Recycle: recycleAvailable(in.Path, volumes)})
+		}
 	}
 	if e != nil {
 		fileError(w, e)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+func recycleAvailable(path string, items []volumes.Volume) bool {
+	for _, item := range items {
+		if strings.HasPrefix(strings.ToLower(strings.ReplaceAll(path, "/", "\\")), strings.ToLower(item.ID)) {
+			return item.Recycle
+		}
+	}
+	return false
 }
 func (s *Server) fileDownload(w http.ResponseWriter, r *http.Request) {
 	if !s.session(w, r, false) {
@@ -299,7 +312,8 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request, write bool) boo
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Password string `json:"password"`
+		Password        string `json:"password"`
+		CurrentPassword string `json:"current_password"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -336,10 +350,15 @@ func (s *Server) password(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Password string `json:"password"`
+		Password        string `json:"password"`
+		CurrentPassword string `json:"current_password"`
 	}
 	if json.NewDecoder(r.Body).Decode(&in) != nil {
 		http.Error(w, "solicitud inválida", 400)
+		return
+	}
+	if !s.auth.VerifyPassword(r.Context(), in.CurrentPassword) {
+		http.Error(w, "credenciales no válidas", http.StatusUnauthorized)
 		return
 	}
 	if e := s.auth.SetPassword(r.Context(), in.Password); e != nil {
