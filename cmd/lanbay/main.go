@@ -6,9 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/danielrigobertojs/lanbay/internal/config"
 	"github.com/danielrigobertojs/lanbay/internal/license"
@@ -69,11 +72,41 @@ func main() {
 	if _, err := server.EnsureCertificate(c.CertificateFile, c.KeyFile); err != nil {
 		fatal(err)
 	}
-	httpServer := &http.Server{Addr: c.Listen, Handler: app.Handler(), ReadHeaderTimeout: 10e9}
+	httpServer := &http.Server{Addr: c.Listen, Handler: app.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10}
 	slog.Info("Lanbay HTTPS listening", "address", c.Listen)
-	if err := httpServer.ListenAndServeTLS(c.CertificateFile, c.KeyFile); err != nil && err != http.ErrServerClosed {
+	listener, err := net.Listen("tcp", c.Listen)
+	if err != nil {
+		fatal(err)
+	}
+	if err := httpServer.ServeTLS(limitListener(listener, 64), c.CertificateFile, c.KeyFile); err != nil && err != http.ErrServerClosed {
 		fatal(err)
 	}
 }
+
+type limitedListener struct {
+	net.Listener
+	slots chan struct{}
+}
+
+func limitListener(listener net.Listener, max int) net.Listener {
+	return &limitedListener{Listener: listener, slots: make(chan struct{}, max)}
+}
+func (l *limitedListener) Accept() (net.Conn, error) {
+	l.slots <- struct{}{}
+	connection, err := l.Listener.Accept()
+	if err != nil {
+		<-l.slots
+		return nil, err
+	}
+	return &limitedConn{Conn: connection, once: sync.Once{}, release: func() { <-l.slots }}, nil
+}
+
+type limitedConn struct {
+	net.Conn
+	once    sync.Once
+	release func()
+}
+
+func (c *limitedConn) Close() error { err := c.Conn.Close(); c.once.Do(c.release); return err }
 
 func fatal(err error) { slog.Error("Lanbay stopped", "error", err); os.Exit(1) }

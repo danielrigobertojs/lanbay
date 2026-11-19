@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -22,10 +23,29 @@ type Config struct {
 	AllowedNetworks  []netip.Prefix
 	SessionIdle      time.Duration
 	DiskAlertPercent int
+	AllowedHosts     []string
 }
 
 func Default(dataDir string) Config {
-	return Config{DataDir: dataDir, Listen: ":8443", CertificateFile: filepath.Join(dataDir, "tls-cert.pem"), KeyFile: filepath.Join(dataDir, "tls-key.pem"), AllowedNetworks: DefaultNetworks(), SessionIdle: 12 * time.Hour, DiskAlertPercent: 90}
+	return Config{DataDir: dataDir, Listen: ":8443", CertificateFile: filepath.Join(dataDir, "tls-cert.pem"), KeyFile: filepath.Join(dataDir, "tls-key.pem"), AllowedNetworks: DefaultNetworks(), AllowedHosts: DefaultHosts(), SessionIdle: 12 * time.Hour, DiskAlertPercent: 90}
+}
+func DefaultHosts() []string {
+	h, _ := os.Hostname()
+	result := []string{"localhost", "127.0.0.1", "::1", h, h + ".local"}
+	for _, a := range interfaceIPs() {
+		result = append(result, a)
+	}
+	return result
+}
+func interfaceIPs() []string {
+	addrs, _ := net.InterfaceAddrs()
+	var result []string
+	for _, a := range addrs {
+		if ip, _, err := net.ParseCIDR(a.String()); err == nil && !ip.IsLoopback() {
+			result = append(result, ip.String())
+		}
+	}
+	return result
 }
 
 func DefaultNetworks() []netip.Prefix {
@@ -76,6 +96,8 @@ func Load(dataDir string) (Config, error) {
 				return c, e
 			}
 			c.AllowedNetworks = prefixes
+		case "allowed_hosts":
+			c.AllowedHosts = splitStrings(value)
 		}
 	}
 	return c, nil
@@ -89,8 +111,23 @@ func Save(c Config) error {
 	for _, p := range c.AllowedNetworks {
 		prefixes = append(prefixes, "\""+p.String()+"\"")
 	}
-	content := fmt.Sprintf("listen = %q\ncertificate_file = %q\nkey_file = %q\nsession_idle_hours = %d\ndisk_alert_percent = %d\nallowed_networks = [%s]\n", c.Listen, c.CertificateFile, c.KeyFile, int(c.SessionIdle.Hours()), c.DiskAlertPercent, strings.Join(prefixes, ", "))
+	hosts := make([]string, 0, len(c.AllowedHosts))
+	for _, host := range c.AllowedHosts {
+		hosts = append(hosts, "\""+host+"\"")
+	}
+	content := fmt.Sprintf("listen = %q\ncertificate_file = %q\nkey_file = %q\nsession_idle_hours = %d\ndisk_alert_percent = %d\nallowed_networks = [%s]\nallowed_hosts = [%s]\n", c.Listen, c.CertificateFile, c.KeyFile, int(c.SessionIdle.Hours()), c.DiskAlertPercent, strings.Join(prefixes, ", "), strings.Join(hosts, ", "))
 	return os.WriteFile(filepath.Join(c.DataDir, fileName), []byte(content), 0600)
+}
+func splitStrings(value string) []string {
+	value = strings.Trim(value, "[] ")
+	if value == "" {
+		return nil
+	}
+	var result []string
+	for _, item := range strings.Split(value, ",") {
+		result = append(result, strings.Trim(strings.TrimSpace(item), "\""))
+	}
+	return result
 }
 
 func parsePrefixes(value string) ([]netip.Prefix, error) {

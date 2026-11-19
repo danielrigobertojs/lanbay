@@ -17,7 +17,7 @@ func manager(t *testing.T) *Manager {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = db.Exec("CREATE TABLE settings (key TEXT PRIMARY KEY,value TEXT NOT NULL)"); e != nil {
+	if _, e = db.Exec("CREATE TABLE settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE sessions (token_hash TEXT PRIMARY KEY, csrf_hash TEXT NOT NULL, created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL, expires_at INTEGER NOT NULL, change_required BOOLEAN NOT NULL)"); e != nil {
 		t.Fatal(e)
 	}
 	return New(db, time.Hour)
@@ -31,10 +31,10 @@ func TestPasswordLoginAndCSRF(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if ok, _ := m.Check(id, "", true); ok {
+	if ok, _ := m.Check(context.Background(), id, "", true); ok {
 		t.Fatal("missing CSRF accepted")
 	}
-	if ok, _ := m.Check(id, csrf, true); !ok {
+	if ok, _ := m.Check(context.Background(), id, csrf, true); !ok {
 		t.Fatal("valid session rejected")
 	}
 }
@@ -73,8 +73,8 @@ func TestCompletePasswordChange(t *testing.T) {
 	if err := m.SetPassword(context.Background(), "correct horse battery"); err != nil {
 		t.Fatal(err)
 	}
-	m.CompletePasswordChange(id)
-	if ok, stillRequired := m.Check(id, csrf, false); !ok || stillRequired {
+	m.CompletePasswordChange(context.Background(), id)
+	if ok, stillRequired := m.Check(context.Background(), id, csrf, false); !ok || stillRequired {
 		t.Fatalf("session after password change = %t, %t", ok, stillRequired)
 	}
 }
