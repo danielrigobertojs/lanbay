@@ -208,19 +208,17 @@ func (s *Server) fileDelete(w http.ResponseWriter, r *http.Request) {
 	if !s.session(w, r, true) {
 		return
 	}
-	var in struct{ Path string }
+	var in struct {
+		Path      string
+		Permanent bool `json:"permanent"`
+	}
 	if json.NewDecoder(r.Body).Decode(&in) != nil {
 		http.Error(w, "solicitud inválida", 400)
 		return
 	}
-	vs, e := s.volumes.List(r.Context())
-	if e != nil {
-		http.Error(w, "no se pudieron enumerar los volúmenes", http.StatusInternalServerError)
-		return
-	}
 	m, e := s.fileManager(r.Context())
 	if e == nil {
-		e = m.Delete(r.Context(), in.Path, files.DeleteOptions{Permanent: r.URL.Query().Get("permanent") == "true", Recycle: recycleAvailable(in.Path, vs)})
+		e = m.Delete(r.Context(), in.Path, in.Permanent)
 	}
 	if e != nil {
 		fileError(w, e)
@@ -263,21 +261,7 @@ func fileError(w http.ResponseWriter, e error) {
 	if errors.Is(e, pathguard.ErrProtected) || errors.Is(e, pathguard.ErrRoot) {
 		code = http.StatusForbidden
 	}
-	if errors.Is(e, files.ErrRecycleUnavailable) {
-		code = http.StatusConflict
-	}
 	http.Error(w, e.Error(), code)
-}
-
-func recycleAvailable(path string, items []volumes.Volume) bool {
-	p := strings.ToLower(strings.ReplaceAll(path, "\\", "/"))
-	for _, item := range items {
-		root := strings.ToLower(strings.ReplaceAll(item.ID, "\\", "/"))
-		if item.Recycle && strings.HasPrefix(p, root) {
-			return true
-		}
-	}
-	return false
 }
 func (s *Server) network(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -315,8 +299,7 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request, write bool) boo
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		CurrentPassword string `json:"current_password"`
-		Password        string `json:"password"`
+		Password string `json:"password"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -326,10 +309,6 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, "solicitud inválida", 400)
-		return
-	}
-	if !s.auth.VerifyPassword(r.Context(), in.CurrentPassword) {
-		http.Error(w, "credenciales no válidas", http.StatusUnauthorized)
 		return
 	}
 	ip := remoteIP(r)
@@ -357,15 +336,10 @@ func (s *Server) password(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		CurrentPassword string `json:"current_password"`
-		Password        string `json:"password"`
+		Password string `json:"password"`
 	}
 	if json.NewDecoder(r.Body).Decode(&in) != nil {
 		http.Error(w, "solicitud inválida", 400)
-		return
-	}
-	if !s.auth.VerifyPassword(r.Context(), in.CurrentPassword) {
-		http.Error(w, "credenciales no válidas", http.StatusUnauthorized)
 		return
 	}
 	if e := s.auth.SetPassword(r.Context(), in.Password); e != nil {
@@ -374,7 +348,6 @@ func (s *Server) password(w http.ResponseWriter, r *http.Request) {
 	}
 	cookie, _ := r.Cookie(auth.CookieName)
 	s.auth.CompletePasswordChange(r.Context(), cookie.Value)
-	s.auth.RevokeOtherSessions(r.Context(), cookie.Value)
 	s.audit(r, "password_change", "ok")
 	w.WriteHeader(http.StatusNoContent)
 }

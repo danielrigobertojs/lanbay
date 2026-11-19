@@ -19,6 +19,10 @@ import (
 
 var ErrRecycleUnavailable = errors.New("recycle_unavailable")
 
+type Trash interface {
+	Delete(context.Context, string) error
+}
+
 type Entry struct {
 	Name      string    `json:"name"`
 	Path      string    `json:"path"`
@@ -39,18 +43,6 @@ type Listing struct {
 	Page    int     `json:"page"`
 	PerPage int     `json:"per_page"`
 }
-
-// Trash sends an already-authorized path to the platform recycle bin.
-// Platform implementations must never show a UI.
-type Trash interface {
-	Delete(context.Context, string) error
-}
-
-type DeleteOptions struct {
-	Permanent bool
-	Recycle   bool
-}
-
 type Manager struct {
 	Guard pathguard.Guard
 	Trash Trash
@@ -178,7 +170,7 @@ func (m Manager) CopyFile(ctx context.Context, source, parent, name string) (str
 	}
 	return dst, copyPath(ctx, src, dst)
 }
-func (m Manager) Delete(ctx context.Context, source string, options DeleteOptions) error {
+func (m Manager) Delete(ctx context.Context, source string, permanent bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -186,8 +178,8 @@ func (m Manager) Delete(ctx context.Context, source string, options DeleteOption
 	if err != nil {
 		return err
 	}
-	if !options.Permanent {
-		if !options.Recycle || m.Trash == nil {
+	if !permanent {
+		if m.Trash == nil {
 			return ErrRecycleUnavailable
 		}
 		return m.Trash.Delete(ctx, p)
