@@ -29,14 +29,15 @@ const (
 )
 
 type Manager struct {
-	db         *sql.DB
-	idle       time.Duration
-	now        func() time.Time
-	mu         sync.Mutex
-	attempts   map[string]*attempt
-	global     *attempt
-	hashSlots  chan struct{}
-	loginQueue chan struct{}
+	db               *sql.DB
+	idle             time.Duration
+	now              func() time.Time
+	mu               sync.Mutex
+	attempts         map[string]*attempt
+	global           *attempt
+	passwordFailures map[string]int
+	hashSlots        chan struct{}
+	loginQueue       chan struct{}
 }
 type attempt struct {
 	failures           int
@@ -44,7 +45,7 @@ type attempt struct {
 }
 
 func New(db *sql.DB, idle time.Duration) *Manager {
-	return &Manager{db: db, idle: idle, now: time.Now, attempts: map[string]*attempt{}, global: &attempt{}, hashSlots: make(chan struct{}, 2), loginQueue: make(chan struct{}, 16)}
+	return &Manager{db: db, idle: idle, now: time.Now, attempts: map[string]*attempt{}, global: &attempt{}, passwordFailures: map[string]int{}, hashSlots: make(chan struct{}, 2), loginQueue: make(chan struct{}, 16)}
 }
 func (m *Manager) EnsurePassword(ctx context.Context) (string, error) {
 	var count int
@@ -94,6 +95,29 @@ func (m *Manager) VerifyPassword(ctx context.Context, password string) bool {
 	ok, _ := verify(encoded, password)
 	<-m.hashSlots
 	return ok
+}
+
+// VerifyPasswordForSession limits password-change guesses independently from
+// login throttling. Five failures revoke the session that made them.
+func (m *Manager) VerifyPasswordForSession(ctx context.Context, id, password string) bool {
+	ok := m.VerifyPassword(ctx, password)
+	m.mu.Lock()
+	key := digest(id)
+	if ok {
+		delete(m.passwordFailures, key)
+		m.mu.Unlock()
+		return true
+	}
+	m.passwordFailures[key]++
+	revoke := m.passwordFailures[key] >= 5
+	if revoke {
+		delete(m.passwordFailures, key)
+	}
+	m.mu.Unlock()
+	if revoke {
+		m.Logout(ctx, id)
+	}
+	return false
 }
 func (m *Manager) Login(ctx context.Context, ip netip.Addr, password string) (string, string, bool, error) {
 	if !ValidPassword(password) {
@@ -169,12 +193,22 @@ func (m *Manager) Check(ctx context.Context, id, csrf string, write bool) (bool,
 }
 func (m *Manager) Logout(ctx context.Context, id string) {
 	_, _ = m.db.ExecContext(ctx, "DELETE FROM sessions WHERE token_hash=?", digest(id))
+	m.mu.Lock()
+	delete(m.passwordFailures, digest(id))
+	m.mu.Unlock()
 }
 func (m *Manager) CompletePasswordChange(ctx context.Context, id string) {
 	_, _ = m.db.ExecContext(ctx, "UPDATE sessions SET change_required=FALSE WHERE token_hash=?", digest(id))
 }
 func (m *Manager) RevokeOtherSessions(ctx context.Context, id string) {
 	_, _ = m.db.ExecContext(ctx, "DELETE FROM sessions WHERE token_hash<>?", digest(id))
+	m.mu.Lock()
+	for key := range m.passwordFailures {
+		if key != digest(id) {
+			delete(m.passwordFailures, key)
+		}
+	}
+	m.mu.Unlock()
 }
 func (m *Manager) get(key string) *attempt {
 	if a := m.attempts[key]; a != nil {

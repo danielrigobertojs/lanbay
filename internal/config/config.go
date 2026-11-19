@@ -10,10 +10,19 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const fileName = "config.toml"
+
+const hostCacheTTL = 30 * time.Second
+
+var hostCache struct {
+	sync.Mutex
+	hosts   []string
+	expires time.Time
+}
 
 type Config struct {
 	DataDir          string
@@ -31,10 +40,24 @@ func Default(dataDir string) Config {
 }
 func DefaultHosts() []string {
 	h, _ := os.Hostname()
-	result := []string{"localhost", "127.0.0.1", "::1", h, h + ".local"}
-	result = append(result, interfaceIPs()...)
-	return result
+	return []string{"localhost", h, h + ".local"}
 }
+
+// RuntimeHosts returns the local interface addresses for Host validation.
+// They are intentionally not persisted: addresses can change between boots.
+func RuntimeHosts() []string {
+	now := time.Now()
+	hostCache.Lock()
+	defer hostCache.Unlock()
+	if now.Before(hostCache.expires) {
+		return append([]string(nil), hostCache.hosts...)
+	}
+	hostCache.hosts = append(DefaultHosts(), "127.0.0.1", "::1")
+	hostCache.hosts = append(hostCache.hosts, interfaceIPs()...)
+	hostCache.expires = now.Add(hostCacheTTL)
+	return append([]string(nil), hostCache.hosts...)
+}
+
 func interfaceIPs() []string {
 	addrs, _ := net.InterfaceAddrs()
 	var result []string

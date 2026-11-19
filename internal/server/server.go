@@ -19,6 +19,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -77,7 +78,7 @@ func (s *Server) host(next http.Handler) http.Handler {
 		if err != nil {
 			host = r.Host
 		}
-		if host == "" || !allowedHost(host, append(s.config.AllowedHosts, config.DefaultHosts()...)) {
+		if host == "" || !allowedHost(host, slices.Concat(s.config.AllowedHosts, config.RuntimeHosts())) {
 			http.Error(w, "host no permitido", http.StatusMisdirectedRequest)
 			return
 		}
@@ -353,20 +354,28 @@ func (s *Server) password(w http.ResponseWriter, r *http.Request) {
 		Password        string `json:"password"`
 		CurrentPassword string `json:"current_password"`
 	}
-	if json.NewDecoder(r.Body).Decode(&in) != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "solicitud demasiado grande", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "solicitud inválida", 400)
 		return
 	}
-	if !s.auth.VerifyPassword(r.Context(), in.CurrentPassword) {
+	cookie, _ := r.Cookie(auth.CookieName)
+	if !s.auth.VerifyPasswordForSession(r.Context(), cookie.Value, in.CurrentPassword) {
+		s.audit(r, "password_change", "failed")
 		http.Error(w, "credenciales no válidas", http.StatusUnauthorized)
 		return
 	}
-	if e := s.auth.SetPassword(r.Context(), in.Password); e != nil {
+	if e := s.SetPassword(r.Context(), in.Password); e != nil {
 		http.Error(w, e.Error(), 400)
 		return
 	}
-	cookie, _ := r.Cookie(auth.CookieName)
 	s.auth.CompletePasswordChange(r.Context(), cookie.Value)
+	s.auth.RevokeOtherSessions(r.Context(), cookie.Value)
 	s.audit(r, "password_change", "ok")
 	w.WriteHeader(http.StatusNoContent)
 }

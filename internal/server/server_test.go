@@ -103,6 +103,33 @@ func TestPasswordEndpointRequiresCurrentPassword(t *testing.T) {
 	}
 }
 
+func TestPasswordEndpointAuditsAndRevokesAfterFiveFailures(t *testing.T) {
+	s := testServer(t)
+	id, csrf, _, err := s.auth.Login(context.Background(), netip.MustParseAddr("127.0.0.1"), "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		r := httptest.NewRequest(http.MethodPost, "https://localhost/api/v1/auth/password", strings.NewReader(`{"current_password":"wrong password value","password":"new correct battery"}`))
+		r.Host = "localhost"
+		r.RemoteAddr = "127.0.0.1:1234"
+		r.AddCookie(&http.Cookie{Name: auth.CookieName, Value: id})
+		r.Header.Set("X-CSRF-Token", csrf)
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("failure %d: %d", i+1, w.Code)
+		}
+	}
+	if ok, _ := s.auth.Check(context.Background(), id, csrf, false); ok {
+		t.Fatal("session remains valid after five password-change failures")
+	}
+	var audits int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM audit_log WHERE action='password_change' AND result='failed'").Scan(&audits); err != nil || audits != 5 {
+		t.Fatalf("failed password-change audits = %d, %v", audits, err)
+	}
+}
+
 func TestSecurityHeaders(t *testing.T) {
 	s := &Server{}
 	r := httptest.NewRequest(http.MethodGet, "https://localhost/", nil)
