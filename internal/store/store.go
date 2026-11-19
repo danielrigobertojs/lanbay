@@ -12,7 +12,7 @@ import (
 
 // Open creates a SQLite connection using the pure-Go driver required by Lanbay.
 func Open(ctx context.Context, path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}

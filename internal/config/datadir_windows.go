@@ -20,6 +20,7 @@ const (
 	fileShareWrite            = 0x00000002
 	fileShareDelete           = 0x00000004
 	openExisting              = 3
+	fileAllAccess             = 0x001F01FF
 )
 
 func DefaultDataDir() string {
@@ -148,35 +149,42 @@ func hasSecureDACL(path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if control&windows.SE_DACL_PROTECTED == 0 || dacl == nil || dacl.AceCount != 2 || !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+	if control&windows.SE_DACL_PROTECTED == 0 || dacl == nil || !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
 		return false, nil
 	}
-	admins, system := false, false
+	type access struct{ effective, inheritOnly bool }
+	admins, system := access{}, access{}
 	for i := uint16(0); i < dacl.AceCount; i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
 			return false, err
 		}
-		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Mask != windows.GENERIC_ALL {
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || (ace.Mask != windows.GENERIC_ALL && ace.Mask != fileAllAccess) {
 			return false, nil
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		var entry *access
 		switch {
 		case sid.IsWellKnown(windows.WinBuiltinAdministratorsSid):
-			if admins {
-				return false, nil
-			}
-			admins = true
+			entry = &admins
 		case sid.IsWellKnown(windows.WinLocalSystemSid):
-			if system {
-				return false, nil
-			}
-			system = true
+			entry = &system
 		default:
 			return false, nil
 		}
+		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+			if entry.inheritOnly {
+				return false, nil
+			}
+			entry.inheritOnly = true
+		} else {
+			if entry.effective {
+				return false, nil
+			}
+			entry.effective = true
+		}
 	}
-	return admins && system, nil
+	return admins.effective && system.effective, nil
 }
 
 // rejectUnsafeEntry prevents a privileged migration from following a junction,
