@@ -4,10 +4,12 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -29,19 +31,14 @@ func DefaultDataDir() string {
 }
 
 func ensureDataDir(path string) error {
-	existed := false
-	if _, err := os.Stat(path); err == nil {
-		existed = true
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	if err := os.MkdirAll(path, 0700); err != nil {
+	created, err := createSecureDirectory(path)
+	if err != nil {
 		return err
 	}
 	if err := rejectUnsafeRoot(path); err != nil {
 		return err
 	}
-	if existed {
+	if !created {
 		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
 		if err != nil {
 			return err
@@ -53,9 +50,7 @@ func ensureDataDir(path string) error {
 		if !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
 			return os.ErrPermission
 		}
-	}
-	if err := protectPath(path, true); err != nil {
-		return err
+		return nil
 	}
 	return filepath.WalkDir(path, func(file string, entry os.DirEntry, err error) error {
 		if err != nil {
@@ -69,6 +64,28 @@ func ensureDataDir(path string) error {
 		}
 		return protectPath(file, entry.IsDir())
 	})
+}
+
+// createSecureDirectory performs a single create attempt with the final ACL.
+// ERROR_ALREADY_EXISTS means another process won the race; callers must treat
+// that directory as untrusted until its owner has been validated.
+func createSecureDirectory(path string) (bool, error) {
+	pointer, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return false, err
+	}
+	sd, err := windows.SecurityDescriptorFromString("O:BAD:P(A;OICI;GA;;;BA)(A;OICI;GA;;;SY)")
+	if err != nil {
+		return false, err
+	}
+	sa := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
+	if err := windows.CreateDirectory(pointer, &sa); err == nil {
+		return true, nil
+	} else if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+		return false, nil
+	} else {
+		return false, err
+	}
 }
 
 // ProtectFile assigns the same explicit Administrators/SYSTEM-only DACL to a secret file.

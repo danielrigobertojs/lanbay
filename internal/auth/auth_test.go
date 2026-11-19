@@ -95,6 +95,31 @@ func TestVerifyPasswordDoesNotCreateSession(t *testing.T) {
 	}
 }
 
+func TestVerifyPasswordForSessionRevokesAfterFiveFailures(t *testing.T) {
+	m := manager(t)
+	if err := m.SetPassword(context.Background(), "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	id, csrf, _, err := m.Login(context.Background(), netip.MustParseAddr("10.0.0.8"), "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if m.VerifyPasswordForSession(context.Background(), id, "wrong password value") {
+			t.Fatal("wrong password accepted")
+		}
+		if ok, _ := m.Check(context.Background(), id, csrf, false); !ok {
+			t.Fatalf("session revoked after %d failures", i+1)
+		}
+	}
+	if m.VerifyPasswordForSession(context.Background(), id, "wrong password value") {
+		t.Fatal("wrong password accepted")
+	}
+	if ok, _ := m.Check(context.Background(), id, csrf, false); ok {
+		t.Fatal("session remains valid after five failures")
+	}
+}
+
 func TestIPv6AttemptsShare64AndCleanup(t *testing.T) {
 	m := manager(t)
 	if attemptKey(netip.MustParseAddr("fd00::1")) != attemptKey(netip.MustParseAddr("fd00::2")) {
