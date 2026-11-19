@@ -4,10 +4,20 @@
 package config
 
 import (
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
 	"golang.org/x/sys/windows"
+)
+
+const (
+	fileAttributeReparsePoint = 0x0400
+	fileShareRead             = 0x00000001
+	fileShareWrite            = 0x00000002
+	fileShareDelete           = 0x00000004
+	openExisting              = 3
 )
 
 func DefaultDataDir() string {
@@ -50,6 +60,9 @@ func ensureDataDir(path string) error {
 		}
 		if file == path {
 			return nil
+		}
+		if err := rejectUnsafeEntry(file, entry); err != nil {
+			return err
 		}
 		return protectPath(file, entry.IsDir())
 	})
@@ -99,6 +112,41 @@ func protectPath(path string, inherit bool) error {
 	}
 	if control&windows.SE_DACL_PROTECTED == 0 || dacl == nil || dacl.AceCount != 2 || !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
 		return os.ErrPermission
+	}
+	return nil
+}
+
+// rejectUnsafeEntry prevents a privileged migration from following a junction,
+// symlink, or hard link planted by an unprivileged user.
+func rejectUnsafeEntry(path string, entry fs.DirEntry) error {
+	if entry.Type()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
+		return fmt.Errorf("unsafe reparse entry: %s", path)
+	}
+	pointer, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	attrs, err := windows.GetFileAttributes(pointer)
+	if err != nil {
+		return err
+	}
+	if attrs&fileAttributeReparsePoint != 0 {
+		return fmt.Errorf("unsafe reparse entry: %s", path)
+	}
+	if entry.IsDir() {
+		return nil
+	}
+	handle, err := windows.CreateFile(pointer, windows.GENERIC_READ, fileShareRead|fileShareWrite|fileShareDelete, nil, openExisting, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(handle)
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return err
+	}
+	if info.NumberOfLinks > 1 {
+		return fmt.Errorf("unsafe hard-linked entry: %s", path)
 	}
 	return nil
 }
