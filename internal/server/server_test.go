@@ -6,6 +6,7 @@ import (
 	"context"
 	"github.com/danielrigobertojs/lanbay/internal/config"
 	"github.com/danielrigobertojs/lanbay/internal/store"
+	"github.com/danielrigobertojs/lanbay/internal/volumes"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -25,6 +26,19 @@ func TestAllowedIP(t *testing.T) {
 		if AllowedIP(netip.MustParseAddr(s), networks) {
 			t.Errorf("%s should be rejected", s)
 		}
+	}
+}
+
+func TestRecycleAvailable(t *testing.T) {
+	items := []volumes.Volume{{ID: `C:\\`, Recycle: true}, {ID: `D:\\`, Recycle: false}}
+	if !recycleAvailable(`c:\\Users\\owner\\file.txt`, items) {
+		t.Fatal("fixed NTFS volume should recycle")
+	}
+	if recycleAvailable(`D:\\file.txt`, items) {
+		t.Fatal("removable volume must require permanent confirmation")
+	}
+	if recycleAvailable(`E:\\file.txt`, items) {
+		t.Fatal("unknown volume must fail closed")
 	}
 }
 
