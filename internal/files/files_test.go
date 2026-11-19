@@ -46,3 +46,21 @@ func TestServiceGuardsAndPaginates(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestDeleteRequiresExplicitPermanentWhenRecycleUnavailable(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "item.txt")
+	if err := os.WriteFile(path, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := Service{Guard: pathguard.Guard{Roots: []string{root}}}
+	if err := s.Delete(context.Background(), path, false); !errors.Is(err, ErrRecycleUnavailable) {
+		t.Fatalf("delete=%v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("file removed despite recycle failure: %v", err)
+	}
+	if err := s.Delete(context.Background(), path, true); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -5,6 +5,7 @@ package files
 import (
 	"archive/zip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +16,14 @@ import (
 
 	"github.com/danielrigobertojs/lanbay/internal/pathguard"
 )
+
+var ErrRecycleUnavailable = errors.New("recycle_unavailable")
+
+// Trash is platform-specific because Windows uses IFileOperation while Unix
+// development builds deliberately have no implicit recycle bin.
+type Trash interface {
+	Delete(context.Context, string) error
+}
 
 type Entry struct {
 	Name      string    `json:"name"`
@@ -36,7 +45,10 @@ type Listing struct {
 	Page    int     `json:"page"`
 	PerPage int     `json:"per_page"`
 }
-type Manager struct{ Guard pathguard.Guard }
+type Manager struct {
+	Guard pathguard.Guard
+	Trash Trash
+}
 type Service = Manager
 
 func (m Manager) List(ctx context.Context, client string, opt ListOptions) (Listing, error) {
@@ -160,13 +172,19 @@ func (m Manager) CopyFile(ctx context.Context, source, parent, name string) (str
 	}
 	return dst, copyPath(ctx, src, dst)
 }
-func (m Manager) Delete(ctx context.Context, source string) error {
+func (m Manager) Delete(ctx context.Context, source string, permanent bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	p, err := m.Guard.Check(source, true)
 	if err != nil {
 		return err
+	}
+	if !permanent {
+		if m.Trash == nil {
+			return ErrRecycleUnavailable
+		}
+		return m.Trash.Delete(ctx, p)
 	}
 	return os.RemoveAll(p)
 }

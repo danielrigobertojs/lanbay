@@ -120,7 +120,7 @@ func (s *Server) fileManager(ctx context.Context) (files.Manager, error) {
 	for _, v := range vs {
 		roots = append(roots, v.ID)
 	}
-	return files.Manager{Guard: pathguard.Guard{Roots: roots, Protected: []string{s.config.DataDir}}}, nil
+	return files.Manager{Guard: pathguard.Guard{Roots: roots, Protected: []string{s.config.DataDir}}, Trash: files.NewTrash()}, nil
 }
 func (s *Server) fileList(w http.ResponseWriter, r *http.Request) {
 	if !s.session(w, r, false) {
@@ -208,14 +208,17 @@ func (s *Server) fileDelete(w http.ResponseWriter, r *http.Request) {
 	if !s.session(w, r, true) {
 		return
 	}
-	var in struct{ Path string }
+	var in struct {
+		Path      string
+		Permanent bool `json:"permanent"`
+	}
 	if json.NewDecoder(r.Body).Decode(&in) != nil {
 		http.Error(w, "solicitud inválida", 400)
 		return
 	}
 	m, e := s.fileManager(r.Context())
 	if e == nil {
-		e = m.Delete(r.Context(), in.Path)
+		e = m.Delete(r.Context(), in.Path, in.Permanent)
 	}
 	if e != nil {
 		fileError(w, e)
