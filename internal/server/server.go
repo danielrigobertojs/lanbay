@@ -120,7 +120,7 @@ func (s *Server) fileManager(ctx context.Context) (files.Manager, error) {
 	for _, v := range vs {
 		roots = append(roots, v.ID)
 	}
-	return files.Manager{Guard: pathguard.Guard{Roots: roots, Protected: []string{s.config.DataDir}}}, nil
+	return files.Manager{Guard: pathguard.Guard{Roots: roots, Protected: []string{s.config.DataDir}}, Trash: files.NewTrash()}, nil
 }
 func (s *Server) fileList(w http.ResponseWriter, r *http.Request) {
 	if !s.session(w, r, false) {
@@ -213,9 +213,14 @@ func (s *Server) fileDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "solicitud inválida", 400)
 		return
 	}
+	vs, e := s.volumes.List(r.Context())
+	if e != nil {
+		http.Error(w, "no se pudieron enumerar los volúmenes", http.StatusInternalServerError)
+		return
+	}
 	m, e := s.fileManager(r.Context())
 	if e == nil {
-		e = m.Delete(r.Context(), in.Path)
+		e = m.Delete(r.Context(), in.Path, files.DeleteOptions{Permanent: r.URL.Query().Get("permanent") == "true", Recycle: recycleAvailable(in.Path, vs)})
 	}
 	if e != nil {
 		fileError(w, e)
@@ -258,7 +263,21 @@ func fileError(w http.ResponseWriter, e error) {
 	if errors.Is(e, pathguard.ErrProtected) || errors.Is(e, pathguard.ErrRoot) {
 		code = http.StatusForbidden
 	}
+	if errors.Is(e, files.ErrRecycleUnavailable) {
+		code = http.StatusConflict
+	}
 	http.Error(w, e.Error(), code)
+}
+
+func recycleAvailable(path string, items []volumes.Volume) bool {
+	p := strings.ToLower(strings.ReplaceAll(path, "\\", "/"))
+	for _, item := range items {
+		root := strings.ToLower(strings.ReplaceAll(item.ID, "\\", "/"))
+		if item.Recycle && strings.HasPrefix(p, root) {
+			return true
+		}
+	}
+	return false
 }
 func (s *Server) network(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
