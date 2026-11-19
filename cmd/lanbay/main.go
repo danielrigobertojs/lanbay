@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sync"
@@ -81,27 +82,55 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	if err := httpServer.ServeTLS(limitListener(listener, 64), c.CertificateFile, c.KeyFile); err != nil && err != http.ErrServerClosed {
+	if err := httpServer.ServeTLS(limitListener(listener, c.AllowedNetworks, 64, 12), c.CertificateFile, c.KeyFile); err != nil && err != http.ErrServerClosed {
 		fatal(err)
 	}
 }
 
 type limitedListener struct {
 	net.Listener
-	slots chan struct{}
+	slots      chan struct{}
+	allowed    []netip.Prefix
+	perIP      map[netip.Addr]int
+	mu         sync.Mutex
+	perIPLimit int
 }
 
-func limitListener(listener net.Listener, max int) net.Listener {
-	return &limitedListener{Listener: listener, slots: make(chan struct{}, max)}
+func limitListener(listener net.Listener, allowed []netip.Prefix, max, perIPLimit int) net.Listener {
+	return &limitedListener{Listener: listener, allowed: allowed, slots: make(chan struct{}, max), perIP: map[netip.Addr]int{}, perIPLimit: perIPLimit}
 }
 func (l *limitedListener) Accept() (net.Conn, error) {
-	l.slots <- struct{}{}
-	connection, err := l.Listener.Accept()
-	if err != nil {
-		<-l.slots
-		return nil, err
+	for {
+		connection, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		host, _, err := net.SplitHostPort(connection.RemoteAddr().String())
+		ip, parseErr := netip.ParseAddr(host)
+		if err != nil || parseErr != nil || !server.AllowedIP(ip.Unmap(), l.allowed) {
+			_ = connection.Close()
+			continue
+		}
+		ip = ip.Unmap()
+		l.mu.Lock()
+		if l.perIP[ip] >= l.perIPLimit {
+			l.mu.Unlock()
+			_ = connection.Close()
+			continue
+		}
+		l.perIP[ip]++
+		l.mu.Unlock()
+		l.slots <- struct{}{}
+		return &limitedConn{Conn: connection, once: sync.Once{}, release: func() {
+			<-l.slots
+			l.mu.Lock()
+			l.perIP[ip]--
+			if l.perIP[ip] == 0 {
+				delete(l.perIP, ip)
+			}
+			l.mu.Unlock()
+		}}, nil
 	}
-	return &limitedConn{Conn: connection, once: sync.Once{}, release: func() { <-l.slots }}, nil
 }
 
 type limitedConn struct {

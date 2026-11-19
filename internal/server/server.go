@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"github.com/danielrigobertojs/lanbay/internal/auth"
 	"github.com/danielrigobertojs/lanbay/internal/config"
 	"github.com/danielrigobertojs/lanbay/internal/volumes"
@@ -141,7 +142,12 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if json.NewDecoder(r.Body).Decode(&in) != nil {
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "solicitud demasiado grande", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "solicitud inválida", 400)
 		return
 	}
