@@ -4,6 +4,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"github.com/danielrigobertojs/lanbay/internal/auth"
 	"github.com/danielrigobertojs/lanbay/internal/config"
 	"github.com/danielrigobertojs/lanbay/internal/store"
 	"net/http"
@@ -65,6 +66,26 @@ func TestHandlerRejectsHostOriginAndLargeBody(t *testing.T) {
 	}
 	if got := request(s, http.MethodPost, "https://localhost/api/v1/auth/login", "localhost", "", []byte(`{"password":"`+strings.Repeat("a", 1<<20)+`"}`)).Code; got != http.StatusRequestEntityTooLarge {
 		t.Fatalf("body=%d", got)
+	}
+}
+
+func TestPasswordEndpointRequiresCurrentPassword(t *testing.T) {
+	s := testServer(t)
+	id, csrf, _, err := s.auth.Login(context.Background(), netip.MustParseAddr("127.0.0.1"), "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{`{"password":"new correct battery"}`, `{"current_password":"wrong password value","password":"new correct battery"}`} {
+		r := httptest.NewRequest(http.MethodPost, "https://localhost/api/v1/auth/password", strings.NewReader(body))
+		r.Host = "localhost"
+		r.RemoteAddr = "127.0.0.1:1234"
+		r.AddCookie(&http.Cookie{Name: auth.CookieName, Value: id})
+		r.Header.Set("X-CSRF-Token", csrf)
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("body %q: %d", body, w.Code)
+		}
 	}
 }
 

@@ -296,7 +296,8 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request, write bool) boo
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Password string `json:"password"`
+		CurrentPassword string `json:"current_password"`
+		Password        string `json:"password"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -306,6 +307,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, "solicitud inválida", 400)
+		return
+	}
+	if !s.auth.VerifyPassword(r.Context(), in.CurrentPassword) {
+		http.Error(w, "credenciales no válidas", http.StatusUnauthorized)
 		return
 	}
 	ip := remoteIP(r)
@@ -333,10 +338,15 @@ func (s *Server) password(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Password string `json:"password"`
+		CurrentPassword string `json:"current_password"`
+		Password        string `json:"password"`
 	}
 	if json.NewDecoder(r.Body).Decode(&in) != nil {
 		http.Error(w, "solicitud inválida", 400)
+		return
+	}
+	if !s.auth.VerifyPassword(r.Context(), in.CurrentPassword) {
+		http.Error(w, "credenciales no válidas", http.StatusUnauthorized)
 		return
 	}
 	if e := s.auth.SetPassword(r.Context(), in.Password); e != nil {
@@ -345,6 +355,7 @@ func (s *Server) password(w http.ResponseWriter, r *http.Request) {
 	}
 	cookie, _ := r.Cookie(auth.CookieName)
 	s.auth.CompletePasswordChange(r.Context(), cookie.Value)
+	s.auth.RevokeOtherSessions(r.Context(), cookie.Value)
 	s.audit(r, "password_change", "ok")
 	w.WriteHeader(http.StatusNoContent)
 }
