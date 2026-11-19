@@ -26,6 +26,7 @@ type Entry struct {
 }
 type ListOptions struct {
 	Page, PerPage  int
+	Limit          int
 	Sort           string
 	Hidden, System bool
 }
@@ -36,6 +37,7 @@ type Listing struct {
 	PerPage int     `json:"per_page"`
 }
 type Manager struct{ Guard pathguard.Guard }
+type Service = Manager
 
 func (m Manager) List(ctx context.Context, client string, opt ListOptions) (Listing, error) {
 	p, err := m.Guard.Check(client, false)
@@ -72,6 +74,9 @@ func (m Manager) List(ctx context.Context, client string, opt ListOptions) (List
 		}
 		return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
 	})
+	if opt.Limit > 0 {
+		opt.PerPage = opt.Limit
+	}
 	if opt.PerPage < 1 || opt.PerPage > 1000 {
 		opt.PerPage = 100
 	}
@@ -88,29 +93,36 @@ func (m Manager) List(ctx context.Context, client string, opt ListOptions) (List
 	}
 	return Listing{Entries: items[start:end], Total: len(items), Page: opt.Page, PerPage: opt.PerPage}, nil
 }
-func (m Manager) Mkdir(ctx context.Context, parent, name string) error {
+func (m Manager) Mkdir(ctx context.Context, parent, name string) (string, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return "", err
 	}
 	p, err := m.Guard.CheckNew(parent, name, true)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return os.Mkdir(p, 0750)
+	return p, os.Mkdir(p, 0750)
 }
-func (m Manager) Rename(ctx context.Context, source, name string) error {
+func (m Manager) Rename(ctx context.Context, source string, args ...string) (string, error) {
+	if len(args) < 1 || len(args) > 2 {
+		return "", fmt.Errorf("rename requires name or parent and name")
+	}
+	parent, name := filepath.Dir(source), args[0]
+	if len(args) == 2 {
+		parent, name = args[0], args[1]
+	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return "", err
 	}
 	src, err := m.Guard.Check(source, true)
 	if err != nil {
-		return err
+		return "", err
 	}
-	dst, err := m.Guard.CheckNew(filepath.Dir(src), name, true)
+	dst, err := m.Guard.CheckNew(parent, name, true)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return os.Rename(src, dst)
+	return dst, os.Rename(src, dst)
 }
 func (m Manager) Move(ctx context.Context, source, parent, name string) error {
 	if err := ctx.Err(); err != nil {
@@ -136,6 +148,17 @@ func (m Manager) Copy(ctx context.Context, source, parent, name string) error {
 		return err
 	}
 	return copyPath(ctx, src, dst)
+}
+func (m Manager) CopyFile(ctx context.Context, source, parent, name string) (string, error) {
+	dst, err := m.Guard.CheckNew(parent, name, true)
+	if err != nil {
+		return "", err
+	}
+	src, err := m.Guard.Check(source, false)
+	if err != nil {
+		return "", err
+	}
+	return dst, copyPath(ctx, src, dst)
 }
 func (m Manager) Delete(ctx context.Context, source string) error {
 	if err := ctx.Err(); err != nil {
