@@ -105,7 +105,7 @@ func (s *Server) fileMkdir(w http.ResponseWriter, r *http.Request) {
 	}
 	m, e := s.fileManager(r.Context())
 	if e == nil {
-		e = m.Mkdir(r.Context(), in.Parent, in.Name)
+		_, e = m.Mkdir(r.Context(), in.Parent, in.Name)
 	}
 	if e != nil {
 		fileError(w, e)
@@ -124,7 +124,7 @@ func (s *Server) fileRename(w http.ResponseWriter, r *http.Request) {
 	}
 	m, e := s.fileManager(r.Context())
 	if e == nil {
-		e = m.Rename(r.Context(), in.Path, in.Name)
+		_, e = m.Rename(r.Context(), in.Path, in.Name)
 	}
 	if e != nil {
 		fileError(w, e)
