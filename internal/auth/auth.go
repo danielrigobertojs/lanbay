@@ -61,8 +61,8 @@ func (m *Manager) EnsurePassword(ctx context.Context) (string, error) {
 	return password, nil
 }
 func (m *Manager) SetPassword(ctx context.Context, password string) error {
-	if len(password) < 12 {
-		return errors.New("password must contain at least 12 characters")
+	if len(password) < 12 || len(password) > 256 {
+		return errors.New("password must contain between 12 and 256 characters")
 	}
 	salt, err := randomBytes(16)
 	if err != nil {
@@ -143,6 +143,17 @@ func (m *Manager) CompletePasswordChange(id string) {
 	}
 	s.changeRequired = false
 	m.sessions[id] = s
+}
+
+// RevokeOtherSessions invalidates every session except the one that changed the password.
+func (m *Manager) RevokeOtherSessions(keep string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, ok := m.sessions[keep]
+	m.sessions = map[string]session{}
+	if ok {
+		m.sessions[keep] = current
+	}
 }
 
 func verify(encoded, password string) bool {

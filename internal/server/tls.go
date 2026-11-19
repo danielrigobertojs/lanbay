@@ -30,7 +30,7 @@ func EnsureCertificate(certFile, keyFile string) (string, error) {
 		return "", e
 	}
 	host, _ := os.Hostname()
-	template := x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "Lanbay"}, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().AddDate(3, 0, 0), KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, DNSNames: []string{host, "localhost"}, IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback}}
+	template := x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "Lanbay"}, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(825 * 24 * time.Hour), KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, DNSNames: []string{host, host + ".local", "localhost"}, IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback}}
 	template.IPAddresses = append(template.IPAddresses, interfaces()...)
 	der, e := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
 	if e != nil {

@@ -29,7 +29,7 @@ func Default(dataDir string) Config {
 }
 
 func DefaultNetworks() []netip.Prefix {
-	return []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128"), netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("172.16.0.0/12"), netip.MustParsePrefix("192.168.0.0/16"), netip.MustParsePrefix("169.254.0.0/16"), netip.MustParsePrefix("fe80::/10"), netip.MustParsePrefix("100.64.0.0/10"), netip.MustParsePrefix("fc00::/7")}
+	return []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128"), netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("172.16.0.0/12"), netip.MustParsePrefix("192.168.0.0/16"), netip.MustParsePrefix("169.254.0.0/16"), netip.MustParsePrefix("fe80::/10"), netip.MustParsePrefix("fc00::/7")}
 }
 
 func Load(dataDir string) (Config, error) {
@@ -37,13 +37,16 @@ func Load(dataDir string) (Config, error) {
 	path := filepath.Join(dataDir, fileName)
 	b, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		if err := os.MkdirAll(dataDir, 0700); err != nil {
+		if err := ensureDataDir(dataDir); err != nil {
 			return c, fmt.Errorf("create data directory: %w", err)
 		}
 		return c, Save(c)
 	}
 	if err != nil {
 		return c, fmt.Errorf("read config: %w", err)
+	}
+	if err := ensureDataDir(dataDir); err != nil {
+		return c, fmt.Errorf("verify data directory: %w", err)
 	}
 	for _, line := range strings.Split(string(b), "\n") {
 		parts := strings.SplitN(strings.TrimSpace(line), "=", 2)
@@ -82,7 +85,7 @@ func Load(dataDir string) (Config, error) {
 }
 
 func Save(c Config) error {
-	if err := os.MkdirAll(c.DataDir, 0700); err != nil {
+	if err := ensureDataDir(c.DataDir); err != nil {
 		return fmt.Errorf("create data directory: %w", err)
 	}
 	prefixes := make([]string, 0, len(c.AllowedNetworks))

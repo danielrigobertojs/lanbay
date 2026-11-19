@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -32,7 +33,14 @@ func New(c config.Config, db *sql.DB, provider volumes.Provider, version string)
 }
 func (s *Server) Initialize(ctx context.Context) (string, error) { return s.auth.EnsurePassword(ctx) }
 func (s *Server) SetPassword(ctx context.Context, password string) error {
-	return s.auth.SetPassword(ctx, password)
+	if err := s.auth.SetPassword(ctx, password); err != nil {
+		return err
+	}
+	err := os.Remove(filepath.Join(s.config.DataDir, "initial-password.txt"))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 func AllowedIP(ip netip.Addr, prefixes []netip.Prefix) bool {
 	for _, p := range prefixes {
@@ -50,7 +58,24 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/system", s.system)
 	mux.HandleFunc("GET /api/v1/volumes", s.volumeList)
 	mux.Handle("GET /", lanbayweb.Handler())
-	return s.network(s.log(mux))
+	return s.network(s.headers(s.log(mux)))
+}
+
+func (s *Server) headers(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			origin := r.Header.Get("Origin")
+			if origin != "" && origin != "https://"+r.Host {
+				http.Error(w, "origen no permitido", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 func (s *Server) network(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -90,6 +115,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Password string `json:"password"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if json.NewDecoder(r.Body).Decode(&in) != nil {
 		http.Error(w, "solicitud inválida", 400)
 		return
@@ -98,7 +124,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	id, csrf, change, e := s.auth.Login(r.Context(), ip, in.Password)
 	if e != nil {
 		s.audit(r, "login", "failed")
-		http.Error(w, e.Error(), http.StatusUnauthorized)
+		http.Error(w, "credenciales no válidas", http.StatusUnauthorized)
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: auth.CookieName, Value: id, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: int(s.config.SessionIdle.Seconds())})
@@ -125,12 +151,13 @@ func (s *Server) password(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "solicitud inválida", 400)
 		return
 	}
-	if e := s.auth.SetPassword(r.Context(), in.Password); e != nil {
+	if e := s.SetPassword(r.Context(), in.Password); e != nil {
 		http.Error(w, e.Error(), 400)
 		return
 	}
 	cookie, _ := r.Cookie(auth.CookieName)
 	s.auth.CompletePasswordChange(cookie.Value)
+	s.auth.RevokeOtherSessions(cookie.Value)
 	s.audit(r, "password_change", "ok")
 	w.WriteHeader(http.StatusNoContent)
 }
