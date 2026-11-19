@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -127,6 +128,61 @@ func TestPasswordEndpointAuditsAndRevokesAfterFiveFailures(t *testing.T) {
 	var audits int
 	if err := s.db.QueryRow("SELECT COUNT(*) FROM audit_log WHERE action='password_change' AND result='failed'").Scan(&audits); err != nil || audits != 5 {
 		t.Fatalf("failed password-change audits = %d, %v", audits, err)
+	}
+}
+
+func TestPasswordEndpointConcurrentFailuresAreBounded(t *testing.T) {
+	s := testServer(t)
+	id, csrf, _, err := s.auth.Login(context.Background(), netip.MustParseAddr("127.0.0.1"), "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const requests = 20
+	start := make(chan struct{})
+	codes := make(chan int, requests)
+	var wg sync.WaitGroup
+	for range requests {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			r := httptest.NewRequest(http.MethodPost, "https://localhost/api/v1/auth/password", strings.NewReader(`{"current_password":"wrong password value","password":"new correct battery"}`))
+			r.Host = "localhost"
+			r.RemoteAddr = "127.0.0.1:1234"
+			r.AddCookie(&http.Cookie{Name: auth.CookieName, Value: id})
+			r.Header.Set("X-CSRF-Token", csrf)
+			w := httptest.NewRecorder()
+			s.Handler().ServeHTTP(w, r)
+			codes <- w.Code
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(codes)
+	for code := range codes {
+		if code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", code)
+		}
+	}
+	var audits int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM audit_log WHERE action='password_change' AND result='failed'").Scan(&audits); err != nil || audits != 5 {
+		t.Fatalf("failed password-change audits = %d, %v", audits, err)
+	}
+	if ok, _ := s.auth.Check(context.Background(), id, csrf, false); ok {
+		t.Fatal("session remains valid after concurrent failures")
+	}
+	r := httptest.NewRequest(http.MethodPost, "https://localhost/api/v1/auth/password", strings.NewReader(`{"current_password":"correct horse battery","password":"new correct battery"}`))
+	r.Host = "localhost"
+	r.RemoteAddr = "127.0.0.1:1234"
+	r.AddCookie(&http.Cookie{Name: auth.CookieName, Value: id})
+	r.Header.Set("X-CSRF-Token", csrf)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("correct password after revocation status = %d, want 401", w.Code)
+	}
+	if !s.auth.VerifyPassword(context.Background(), "correct horse battery") || s.auth.VerifyPassword(context.Background(), "new correct battery") {
+		t.Fatal("password changed after session revocation")
 	}
 }
 
