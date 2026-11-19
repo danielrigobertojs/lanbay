@@ -20,6 +20,7 @@ func manager(t *testing.T) *Manager {
 	if e != nil {
 		t.Fatal(e)
 	}
+	db.SetMaxOpenConns(1)
 	if _, e = db.Exec("CREATE TABLE settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE sessions (token_hash TEXT PRIMARY KEY, csrf_hash TEXT NOT NULL, created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL, expires_at INTEGER NOT NULL, change_required BOOLEAN NOT NULL)"); e != nil {
 		t.Fatal(e)
 	}
@@ -106,14 +107,14 @@ func TestVerifyPasswordForSessionRevokesAfterFiveFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 4; i++ {
-		if ok, _ := m.VerifyPasswordForSession(context.Background(), id, "wrong password value"); ok {
+		if ok, _, err := m.VerifyPasswordForSession(context.Background(), id, "wrong password value"); err != nil || ok {
 			t.Fatal("wrong password accepted")
 		}
 		if ok, _ := m.Check(context.Background(), id, csrf, false); !ok {
 			t.Fatalf("session revoked after %d failures", i+1)
 		}
 	}
-	if ok, _ := m.VerifyPasswordForSession(context.Background(), id, "wrong password value"); ok {
+	if ok, _, err := m.VerifyPasswordForSession(context.Background(), id, "wrong password value"); err != nil || ok {
 		t.Fatal("wrong password accepted")
 	}
 	if ok, _ := m.Check(context.Background(), id, csrf, false); ok {
@@ -139,7 +140,10 @@ func TestVerifyPasswordForSessionReservesConcurrentAttempts(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, failed := m.VerifyPasswordForSession(context.Background(), id, "wrong password value")
+			_, failed, err := m.VerifyPasswordForSession(context.Background(), id, "wrong password value")
+			if err != nil {
+				t.Errorf("verify password: %v", err)
+			}
 			results <- failed
 		}()
 	}
@@ -158,7 +162,7 @@ func TestVerifyPasswordForSessionReservesConcurrentAttempts(t *testing.T) {
 	if ok, _ := m.Check(context.Background(), id, csrf, false); ok {
 		t.Fatal("session remains valid after concurrent failures")
 	}
-	if ok, failed := m.VerifyPasswordForSession(context.Background(), id, "correct horse battery"); ok || failed {
+	if ok, failed, err := m.VerifyPasswordForSession(context.Background(), id, "correct horse battery"); err != nil || ok || failed {
 		t.Fatalf("correct password after revocation = %t, failed = %t", ok, failed)
 	}
 }

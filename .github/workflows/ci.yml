@@ -76,3 +76,6 @@ jobs:
       - name: Run adversarial pathguard suite on Windows
         shell: pwsh
         run: go test -count=1 ./internal/pathguard/...
+      - name: Run secure data-directory suite on Windows
+        shell: pwsh
+        run: go test -count=1 ./internal/config/...

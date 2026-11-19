@@ -365,7 +365,14 @@ func (s *Server) password(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cookie, _ := r.Cookie(auth.CookieName)
-	verified, failed := s.auth.VerifyPasswordForSession(r.Context(), cookie.Value, in.CurrentPassword)
+	verified, failed, e := s.auth.VerifyPasswordForSession(r.Context(), cookie.Value, in.CurrentPassword)
+	if e != nil {
+		if failed {
+			s.audit(r, "password_change", "failed")
+		}
+		http.Error(w, "no se pudo revocar la sesión", http.StatusInternalServerError)
+		return
+	}
 	if !verified {
 		if failed {
 			s.audit(r, "password_change", "failed")
@@ -412,5 +419,7 @@ func remoteIP(r *http.Request) netip.Addr {
 }
 func hostname() string { h, _ := os.Hostname(); return h }
 func (s *Server) audit(r *http.Request, action, result string) {
-	_, _ = s.db.ExecContext(r.Context(), "INSERT INTO audit_log(created_at,ip,action,result) VALUES(?,?,?,?)", time.Now().UTC().Format(time.RFC3339), remoteIP(r).String(), action, result)
+	if _, err := s.db.ExecContext(r.Context(), "INSERT INTO audit_log(created_at,ip,action,result) VALUES(?,?,?,?)", time.Now().UTC().Format(time.RFC3339), remoteIP(r).String(), action, result); err != nil {
+		slog.Error("write audit record", "action", action, "result", result, "error", err)
+	}
 }

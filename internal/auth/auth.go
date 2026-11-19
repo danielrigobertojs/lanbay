@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"golang.org/x/crypto/argon2"
+	"log/slog"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -153,7 +154,7 @@ func (m *Manager) VerifyPassword(ctx context.Context, password string) bool {
 // concurrent batch cannot queue past the limit. failed reports a completed,
 // incorrect password check and is used for auditing; rejected reservations are
 // deliberately not audited as hash attempts.
-func (m *Manager) VerifyPasswordForSession(ctx context.Context, id, password string) (valid, failed bool) {
+func (m *Manager) VerifyPasswordForSession(ctx context.Context, id, password string) (valid, failed bool, err error) {
 	key := digest(id)
 	m.mu.Lock()
 	state := m.passwordFailures[key]
@@ -163,7 +164,7 @@ func (m *Manager) VerifyPasswordForSession(ctx context.Context, id, password str
 	}
 	if state.revoked || state.failures+state.inFlight >= 5 {
 		m.mu.Unlock()
-		return false, false
+		return false, false, nil
 	}
 	state.inFlight++
 	m.mu.Unlock()
@@ -184,9 +185,12 @@ func (m *Manager) VerifyPasswordForSession(ctx context.Context, id, password str
 	if revoke {
 		// Keep the revoked marker after deleting the durable session so every
 		// request that already passed HTTP authentication still fails closed.
-		_, _ = m.db.ExecContext(ctx, "DELETE FROM sessions WHERE token_hash=?", key)
+		if _, err := m.db.ExecContext(ctx, "DELETE FROM sessions WHERE token_hash=?", key); err != nil {
+			slog.Error("revoke password-change session", "error", err)
+			return false, failed, fmt.Errorf("revoke password-change session: %w", err)
+		}
 	}
-	return valid, failed
+	return valid, failed, nil
 }
 func (m *Manager) Login(ctx context.Context, ip netip.Addr, password string) (string, string, bool, error) {
 	if !ValidPassword(password) {
