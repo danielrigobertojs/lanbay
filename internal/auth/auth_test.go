@@ -4,6 +4,8 @@ package auth
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
+	"golang.org/x/crypto/argon2"
 	_ "modernc.org/sqlite"
 	"net/netip"
 	"strings"
@@ -102,5 +104,37 @@ func TestIPv6AttemptsShare64AndCleanup(t *testing.T) {
 	m.cleanup(time.Now())
 	if _, ok := m.attempts["old"]; ok {
 		t.Fatal("stale attempt not removed")
+	}
+}
+
+func TestGlobalFailureBudget(t *testing.T) {
+	m := manager(t)
+	now := time.Now()
+	for i := 0; i < 100; i++ {
+		m.fail("source"+string(rune(i)), now)
+	}
+	if !now.Before(m.global.blockedUntil) {
+		t.Fatal("global failure budget did not block")
+	}
+}
+
+func TestLoginRehashesLegacyPHCParameters(t *testing.T) {
+	m := manager(t)
+	salt := []byte("0123456789abcdef")
+	password := "correct horse battery"
+	hash := argon2.IDKey([]byte(password), salt, 1, 1024, 1, 32)
+	legacy := "$argon2id$v=19$m=1024,t=1,p=1$" + base64.RawStdEncoding.EncodeToString(salt) + "$" + base64.RawStdEncoding.EncodeToString(hash)
+	if _, err := m.db.Exec("INSERT INTO settings(key,value) VALUES('password_hash',?)", legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := m.Login(context.Background(), netip.MustParseAddr("10.0.0.1"), password); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := m.db.QueryRow("SELECT value FROM settings WHERE key='password_hash'").Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got == legacy {
+		t.Fatal("legacy PHC was not rehashed")
 	}
 }

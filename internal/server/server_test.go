@@ -3,7 +3,10 @@ package server
 
 import (
 	"github.com/danielrigobertojs/lanbay/internal/config"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -19,6 +22,27 @@ func TestAllowedIP(t *testing.T) {
 			t.Errorf("%s should be rejected", s)
 		}
 	}
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	s := &Server{}
+	r := httptest.NewRequest(http.MethodGet, "https://localhost/", nil)
+	w := httptest.NewRecorder()
+	s.headers(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(w, r)
+	if got := w.Header().Get("Content-Security-Policy"); got == "" || !containsAll(got, "script-src", "style-src", "img-src", "connect-src", "object-src") {
+		t.Fatalf("incomplete CSP: %q", got)
+	}
+	if w.Header().Get("Cross-Origin-Opener-Policy") != "same-origin" || w.Header().Get("Cross-Origin-Resource-Policy") != "same-origin" {
+		t.Fatal("cross-origin headers missing")
+	}
+}
+func containsAll(value string, parts ...string) bool {
+	for _, part := range parts {
+		if !strings.Contains(value, part) {
+			return false
+		}
+	}
+	return true
 }
 
 func TestAllowedHost(t *testing.T) {
