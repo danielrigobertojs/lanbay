@@ -1,41 +1,16 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <script>
-  let password = ''
-  let currentPassword = ''
-  let csrf = ''
-  let error = ''
-  let volumes = []
-  let system = null
-  let alertPercent = 90
-  let changing = false
-  const format = value => `${(value / 1073741824).toFixed(1)} GB`
-  async function login() {
-    error = ''
-    const response = await fetch('/api/v1/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) })
-    if (!response.ok) { error = await response.text(); return }
-    const data = await response.json(); csrf = data.csrf_token; changing = data.password_change_required; password = ''
-    if (!changing) await refresh()
-  }
-  async function changePassword() {
-    const response = await fetch('/api/v1/auth/password', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify({ current_password: currentPassword, password }) })
-    if (!response.ok) { error = await response.text(); return }; changing = false; password = ''; currentPassword = ''; await refresh()
-  }
-  async function refresh() {
-    const [systemResponse, volumeResponse] = await Promise.all([fetch('/api/v1/system'), fetch('/api/v1/volumes')])
-    if (!systemResponse.ok || !volumeResponse.ok) { error = 'No se pudo actualizar el panel.'; return }
-    system = await systemResponse.json(); const data = await volumeResponse.json(); volumes = data.volumes; alertPercent = data.alert_percent
-  }
+  let password='', csrf='', error='', volumes=[], path='', entries=[], page=1, total=0, newName='', hidden=false, system=false
+  const headers=()=>({'Content-Type':'application/json','X-CSRF-Token':csrf})
+  async function login(){const r=await fetch('/api/v1/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password})});if(!r.ok){error=await r.text();return};csrf=(await r.json()).csrf_token;await refresh()}
+  async function refresh(){const r=await fetch('/api/v1/volumes');if(!r.ok){error=await r.text();return};volumes=(await r.json()).volumes;if(!path&&volumes.length)open(volumes[0].id)}
+  async function open(next,p=1){path=next;page=p;const q=new URLSearchParams({path,page:p,per_page:100,hidden,system});const r=await fetch('/api/v1/files?'+q);if(!r.ok){error=await r.text();return};const d=await r.json();entries=d.entries;total=d.total;page=d.page}
+  function crumbs(){const s=path.replaceAll('\\','/'), p=s.split('/').filter(Boolean);return p.map((x,i)=>({x,path:s.match(/^[A-Za-z]:\//)?p.slice(0,i+1).join('/')+'/':'/'+p.slice(0,i+1).join('/')}))}
+  async function mkdir(){if(!newName)return;const r=await fetch('/api/v1/files/mkdir',{method:'POST',headers:headers(),body:JSON.stringify({parent:path,name:newName})});if(!r.ok){error=await r.text();return};newName='';open(path)}
+  async function rename(e){const name=prompt('Nuevo nombre',e.name);if(!name)return;const r=await fetch('/api/v1/files/rename',{method:'POST',headers:headers(),body:JSON.stringify({path:e.path,name})});if(!r.ok){error=await r.text();return};open(path)}
+  async function remove(e){if(!confirm(`Borrar 1 elemento: ${e.name}?`))return;const r=await fetch('/api/v1/files',{method:'DELETE',headers:headers(),body:JSON.stringify({path:e.path,permanent:true})});if(!r.ok){error=await r.text();return};open(path)}
 </script>
-
 <svelte:head><title>Lanbay</title></svelte:head>
-{#if !csrf}
-  <main class="login"><section><p class="eyebrow">PANEL LAN</p><h1>Lanbay</h1><p>Administra el equipo desde tu red local.</p><label>Contraseña <input type="password" bind:value={password} on:keydown={(event) => event.key === 'Enter' && login()} /></label>{#if error}<p class="error">{error}</p>{/if}<button on:click={login}>Iniciar sesión</button></section></main>
-{:else if changing}
-  <main class="login"><section><p class="eyebrow">PRIMER ACCESO</p><h1>Cambia la contraseña</h1><label>Contraseña actual<input type="password" bind:value={currentPassword} /></label><label>Nueva contraseña (12 caracteres mínimo)<input type="password" bind:value={password} /></label>{#if error}<p class="error">{error}</p>{/if}<button on:click={changePassword}>Guardar contraseña</button></section></main>
-{:else}
-  <main><header><div><p class="eyebrow">ALMACENAMIENTO</p><h1>Buenas, {system?.hostname || 'Lanbay'}</h1><p>Actualización automática cada 30 segundos.</p></div><button class="secondary" on:click={refresh}>Actualizar</button></header><section class="summary"><span>Equipo: {system?.platform || '—'}</span><span>Versión: {system?.version || '—'}</span><span>Certificado: {system?.certificate_fingerprint || '—'}</span></section><section class="grid">{#each volumes as volume}<article class:warning={volume.used_percent >= alertPercent}><div class="card-header"><span class="disk">{volume.id}</span><span>{volume.type}</span></div><h2>{volume.label || 'Volumen local'}</h2><div class="meter"><i style={`width:${volume.used_percent}%`}></i></div><strong>{volume.used_percent}% usado</strong><p>{format(volume.used())} usados de {format(volume.total)}</p><footer><span>{volume.filesystem}</span><span>{format(volume.free)} libres</span></footer>{#if volume.recycle}<small>Papelera disponible</small>{:else}<small class="muted">Borrado permanente requiere confirmación</small>{/if}</article>{:else}<p>No hay volúmenes locales disponibles.</p>{/each}</section></main>
-{/if}
-
-<style>
-  :global(*){box-sizing:border-box}:global(body){margin:0;background:#0b1020;color:#e9eefb;font:16px/1.5 system-ui,sans-serif}main{max-width:1120px;margin:auto;padding:clamp(1.25rem,4vw,4rem)}header{display:flex;gap:2rem;justify-content:space-between;align-items:center;margin-bottom:2rem}.login{min-height:100vh;display:grid;place-items:center}.login section{width:min(100%,28rem);padding:2rem;background:#151d33;border:1px solid #283554;border-radius:1rem}h1{margin:.1rem 0;font-size:clamp(2rem,6vw,3.7rem);letter-spacing:-.06em}h2{font-size:1.15rem}.eyebrow{color:#72d4ff;font-size:.75rem;font-weight:800;letter-spacing:.16em}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(235px,1fr));gap:1rem}article{padding:1.25rem;border:1px solid #283554;border-radius:1rem;background:#151d33}.card-header,footer,.summary{display:flex;justify-content:space-between;gap:.6rem;color:#aab8d5;font-size:.86rem}.disk{color:#72d4ff;font-weight:800}.meter{height:.55rem;overflow:hidden;background:#26334e;border-radius:2rem;margin:1rem 0 .45rem}.meter i{display:block;height:100%;background:#6ee7b7;border-radius:inherit}.warning .meter i{background:#fbbf24}.warning{border-color:#805e19}small{display:block;margin-top:1rem;color:#72d4ff}.muted{color:#aab8d5}label{display:grid;gap:.45rem;margin:1.25rem 0}input{padding:.8rem;border:1px solid #405275;border-radius:.5rem;background:#0b1020;color:inherit;font:inherit}button{border:0;border-radius:.6rem;padding:.8rem 1.1rem;background:#72d4ff;color:#07111f;font-weight:800;font:inherit;cursor:pointer}.secondary{background:#263a5a;color:#e9eefb}.error{color:#ff9b9b}@media(max-width:560px){header{align-items:flex-start;flex-direction:column}.summary{flex-direction:column}}
-</style>
+{#if !csrf}<main class="login"><section><h1>Lanbay</h1><label>Contraseña <input type="password" bind:value={password}/></label><button on:click={login}>Iniciar sesión</button>{#if error}<p class="error">{error}</p>{/if}</section></main>
+{:else}<main><header><h1>Archivos</h1><button on:click={refresh}>Actualizar</button></header>{#if error}<p class="error">{error}</p>{/if}<nav>{#each crumbs() as crumb,i}<button class="link" on:click={()=>open(crumb.path)}>{crumb.x}</button>{#if i<crumbs().length-1} / {/if}{/each}</nav><section class="tools"><select bind:value={path} on:change={e=>open(e.target.value)}>{#each volumes as v}<option value={v.id}>{v.id} · {v.label||'Volumen local'}</option>{/each}</select><input placeholder="Nueva carpeta" bind:value={newName}/><button on:click={mkdir}>Crear carpeta</button><label><input type="checkbox" bind:checked={hidden} on:change={()=>open(path)}/> ocultos</label><label><input type="checkbox" bind:checked={system} on:change={()=>open(path)}/> sistema</label></section><p>{total} elementos · página {page}</p><table><thead><tr><th>Nombre</th><th>Tamaño</th><th>Acciones</th></tr></thead><tbody>{#each entries as entry}<tr><td>{#if entry.directory}<button class="link" on:click={()=>open(entry.path)}>{entry.name}/</button>{:else}{entry.name}{/if}</td><td>{entry.directory?'—':entry.size}</td><td><button on:click={()=>rename(entry)}>Renombrar</button> <button class="danger" on:click={()=>remove(entry)}>Borrar</button></td></tr>{:else}<tr><td colspan="3">Carpeta vacía</td></tr>{/each}</tbody></table><footer><button disabled={page<=1} on:click={()=>open(path,page-1)}>Anterior</button><button disabled={page*100>=total} on:click={()=>open(path,page+1)}>Siguiente</button></footer></main>{/if}
+<style>:global(*){box-sizing:border-box}:global(body){margin:0;background:#0b1020;color:#e9eefb;font:16px system-ui,sans-serif}main{max-width:1000px;margin:auto;padding:2rem}.login{min-height:100vh;display:grid;place-items:center}.login section{padding:2rem;background:#151d33;border-radius:1rem}header,.tools,footer{display:flex;gap:1rem;flex-wrap:wrap;align-items:center}table{width:100%;margin:1rem 0;border-collapse:collapse;background:#151d33}th,td{padding:.8rem;border-bottom:1px solid #283554;text-align:left}input,select,button{padding:.65rem;border-radius:.4rem;border:1px solid #405275;background:#151d33;color:inherit}button{cursor:pointer}.link{border:0;background:none;color:#72d4ff;padding:0}.danger,.error{color:#ff9b9b}</style>
