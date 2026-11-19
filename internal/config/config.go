@@ -32,9 +32,7 @@ func Default(dataDir string) Config {
 func DefaultHosts() []string {
 	h, _ := os.Hostname()
 	result := []string{"localhost", "127.0.0.1", "::1", h, h + ".local"}
-	for _, a := range interfaceIPs() {
-		result = append(result, a)
-	}
+	result = append(result, interfaceIPs()...)
 	return result
 }
 func interfaceIPs() []string {

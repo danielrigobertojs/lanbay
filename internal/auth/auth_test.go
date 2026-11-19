@@ -78,3 +78,29 @@ func TestCompletePasswordChange(t *testing.T) {
 		t.Fatalf("session after password change = %t, %t", ok, stillRequired)
 	}
 }
+
+func TestVerifyPasswordDoesNotCreateSession(t *testing.T) {
+	m := manager(t)
+	if err := m.SetPassword(context.Background(), "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	if !m.VerifyPassword(context.Background(), "correct horse battery") || m.VerifyPassword(context.Background(), "wrong password value") {
+		t.Fatal("password verification mismatch")
+	}
+	var sessions int
+	if err := m.db.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&sessions); err != nil || sessions != 0 {
+		t.Fatalf("sessions=%d err=%v", sessions, err)
+	}
+}
+
+func TestIPv6AttemptsShare64AndCleanup(t *testing.T) {
+	m := manager(t)
+	if attemptKey(netip.MustParseAddr("fd00::1")) != attemptKey(netip.MustParseAddr("fd00::2")) {
+		t.Fatal("/64 grouping missing")
+	}
+	m.attempts["old"] = &attempt{last: time.Now().Add(-25 * time.Hour)}
+	m.cleanup(time.Now())
+	if _, ok := m.attempts["old"]; ok {
+		t.Fatal("stale attempt not removed")
+	}
+}

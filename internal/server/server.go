@@ -67,7 +67,7 @@ func (s *Server) host(next http.Handler) http.Handler {
 		if err != nil {
 			host = r.Host
 		}
-		if host == "" || !allowedHost(host, s.config.AllowedHosts) {
+		if host == "" || !allowedHost(host, append(s.config.AllowedHosts, config.DefaultHosts()...)) {
 			http.Error(w, "host no permitido", http.StatusMisdirectedRequest)
 			return
 		}
@@ -183,7 +183,7 @@ func (s *Server) password(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "solicitud inválida", 400)
 		return
 	}
-	if _, _, _, err := s.auth.Login(r.Context(), remoteIP(r), in.CurrentPassword); err != nil {
+	if !s.auth.VerifyPassword(r.Context(), in.CurrentPassword) {
 		http.Error(w, "credenciales no válidas", http.StatusUnauthorized)
 		return
 	}

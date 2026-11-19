@@ -76,6 +76,25 @@ func (m *Manager) SetPassword(ctx context.Context, password string) error {
 	return err
 }
 func ValidPassword(p string) bool { return len(p) >= 12 && len(p) <= 256 }
+
+// VerifyPassword compares the configured secret without creating a session or consuming login rate-limit state.
+func (m *Manager) VerifyPassword(ctx context.Context, password string) bool {
+	if !ValidPassword(password) {
+		return false
+	}
+	var encoded string
+	if err := m.db.QueryRowContext(ctx, "SELECT value FROM settings WHERE key='password_hash'").Scan(&encoded); err != nil {
+		return false
+	}
+	select {
+	case m.hashSlots <- struct{}{}:
+	case <-ctx.Done():
+		return false
+	}
+	ok, _ := verify(encoded, password)
+	<-m.hashSlots
+	return ok
+}
 func (m *Manager) Login(ctx context.Context, ip netip.Addr, password string) (string, string, bool, error) {
 	if !ValidPassword(password) {
 		return "", "", false, errors.New("invalid credentials")

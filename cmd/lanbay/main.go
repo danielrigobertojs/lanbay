@@ -34,6 +34,12 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
+	if _, err := server.EnsureCertificate(c.CertificateFile, c.KeyFile); err != nil {
+		fatal(err)
+	}
+	if fingerprint, err := server.CertificateFingerprint(c.CertificateFile); err == nil {
+		slog.Info("Huella del certificado TLS", "fingerprint", fingerprint)
+	}
 	db, err := store.Open(ctx, filepath.Join(c.DataDir, "lanbay.sqlite"))
 	if err != nil {
 		fatal(err)
@@ -68,9 +74,6 @@ func main() {
 			fatal(fmt.Errorf("proteger contraseña inicial: %w", err))
 		}
 		slog.Warn("Contraseña inicial escrita en initial-password.txt protegido; cámbiela tras iniciar sesión")
-	}
-	if _, err := server.EnsureCertificate(c.CertificateFile, c.KeyFile); err != nil {
-		fatal(err)
 	}
 	httpServer := &http.Server{Addr: c.Listen, Handler: app.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10}
 	slog.Info("Lanbay HTTPS listening", "address", c.Listen)

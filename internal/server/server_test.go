@@ -20,3 +20,15 @@ func TestAllowedIP(t *testing.T) {
 		}
 	}
 }
+
+func TestAllowedHost(t *testing.T) {
+	allowed := []string{"panel.local", "192.168.1.2", "::1"}
+	for _, host := range []string{"panel.local", "PANEL.LOCAL", "[::1]"} {
+		if !allowedHost(host, allowed) {
+			t.Errorf("host %q rejected", host)
+		}
+	}
+	if allowedHost("attacker.example", allowed) {
+		t.Fatal("unexpected host accepted")
+	}
+}
