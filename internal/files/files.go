@@ -19,6 +19,14 @@ import (
 
 var ErrRecycleUnavailable = errors.New("recycle_unavailable")
 
+type Trash interface {
+	Delete(context.Context, string) error
+}
+type DeleteOptions struct {
+	Permanent bool
+	Recycle   bool
+}
+
 type Entry struct {
 	Name      string    `json:"name"`
 	Path      string    `json:"path"`
@@ -39,18 +47,6 @@ type Listing struct {
 	Page    int     `json:"page"`
 	PerPage int     `json:"per_page"`
 }
-
-// Trash sends an already-authorized path to the platform recycle bin.
-// Platform implementations must never show a UI.
-type Trash interface {
-	Delete(context.Context, string) error
-}
-
-type DeleteOptions struct {
-	Permanent bool
-	Recycle   bool
-}
-
 type Manager struct {
 	Guard pathguard.Guard
 	Trash Trash
