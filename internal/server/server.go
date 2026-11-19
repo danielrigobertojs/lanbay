@@ -120,6 +120,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "solicitud inválida", 400)
 		return
 	}
+	if !auth.ValidPassword(in.Password) {
+		s.audit(r, "login", "failed")
+		http.Error(w, "credenciales no válidas", http.StatusUnauthorized)
+		return
+	}
 	ip := remoteIP(r)
 	id, csrf, change, e := s.auth.Login(r.Context(), ip, in.Password)
 	if e != nil {

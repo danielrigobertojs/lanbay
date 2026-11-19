@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	_ "modernc.org/sqlite"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 )
@@ -42,10 +43,20 @@ func TestRateLimit(t *testing.T) {
 	_ = m.SetPassword(context.Background(), "correct horse battery")
 	ip := netip.MustParseAddr("10.0.0.4")
 	for i := 0; i < 5; i++ {
-		_, _, _, _ = m.Login(context.Background(), ip, "nope")
+		_, _, _, _ = m.Login(context.Background(), ip, "wrong password value")
 	}
 	if _, _, _, e := m.Login(context.Background(), ip, "correct horse battery"); e == nil {
 		t.Fatal("rate limit missing")
+	}
+}
+
+func TestLoginRejectsOversizedPasswordBeforeHash(t *testing.T) {
+	m := manager(t)
+	if err := m.SetPassword(context.Background(), "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := m.Login(context.Background(), netip.MustParseAddr("10.0.0.9"), strings.Repeat("a", 257)); err == nil {
+		t.Fatal("oversized password accepted")
 	}
 }
 
