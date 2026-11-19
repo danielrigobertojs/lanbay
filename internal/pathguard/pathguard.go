@@ -7,37 +7,62 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 )
 
 var (
-	ErrInvalid   = errors.New("ruta no válida")
-	ErrOutside   = errors.New("ruta fuera de los volúmenes permitidos")
-	ErrProtected = errors.New("zona protegida: solo lectura")
-	ErrRoot      = errors.New("no se puede modificar la raíz de un volumen")
+	ErrInvalid   = errors.New("invalid_path")
+	ErrOutside   = errors.New("outside_allowed_volume")
+	ErrProtected = errors.New("protected_zone")
+	ErrRoot      = errors.New("volume_root")
 )
 
-// Guard resolves paths before authorizing them. Roots and protected paths must
-// already be canonical absolute paths supplied by the host platform.
 type Guard struct{ Roots, Protected []string }
 
-// Check validates an untrusted path and authorizes a read or write operation.
 func (g Guard) Check(client string, write bool) (string, error) {
 	if err := lexical(client); err != nil {
 		return "", err
 	}
 	p, err := resolve(client)
 	if err != nil {
-		return "", fmt.Errorf("resolver ruta: %w", err)
+		return "", fmt.Errorf("resolve existing path: %w", err)
 	}
-	p = filepath.Clean(p)
+	return g.authorize(p, write)
+}
+
+// CheckNew validates an untrusted leaf below an existing, authorized parent.
+func (g Guard) CheckNew(parent, name string, write bool) (string, error) {
+	if err := lexicalName(name); err != nil {
+		return "", err
+	}
+	p, err := g.Check(parent, false)
+	if err != nil {
+		return "", err
+	}
+	if write {
+		for _, protected := range g.Protected {
+			canonical, e := resolve(protected)
+			if e != nil {
+				return "", fmt.Errorf("resolve protected zone: %w", e)
+			}
+			if within(p, canonical) {
+				return "", ErrProtected
+			}
+		}
+	}
+	return filepath.Join(p, name), nil
+}
+
+func (g Guard) authorize(path string, write bool) (string, error) {
+	p := filepath.Clean(path)
 	root := ""
 	for _, candidate := range g.Roots {
-		canonical, e := resolve(candidate)
-		if e != nil {
-			continue
+		canonical, err := resolve(candidate)
+		if err != nil {
+			return "", fmt.Errorf("resolve allowed root: %w", err)
 		}
 		if within(p, canonical) {
-			root = filepath.Clean(canonical)
+			root = canonical
 			break
 		}
 	}
@@ -49,8 +74,11 @@ func (g Guard) Check(client string, write bool) (string, error) {
 	}
 	if write {
 		for _, protected := range g.Protected {
-			canonical, e := resolve(protected)
-			if e == nil && within(p, canonical) {
+			canonical, err := resolve(protected)
+			if err != nil {
+				return "", fmt.Errorf("resolve protected zone: %w", err)
+			}
+			if within(p, canonical) || within(canonical, p) {
 				return "", ErrProtected
 			}
 		}
@@ -59,38 +87,86 @@ func (g Guard) Check(client string, write bool) (string, error) {
 }
 
 func lexical(p string) error {
-	if p == "" || strings.HasPrefix(p, `\\`) || strings.HasPrefix(p, "//") || strings.HasPrefix(strings.ToLower(p), `\\?\unc\`) || strings.HasPrefix(p, `\\.\`) || strings.HasPrefix(strings.ToLower(p), `\\?\globalroot`) {
+	if p == "" || len(p) > 32767 || !utf8.ValidString(p) {
 		return ErrInvalid
 	}
-	if strings.Contains(strings.ToLower(p), "::$data") || strings.Contains(p, ":$") {
+	q := strings.ReplaceAll(p, "\\", "/")
+	lower := strings.ToLower(q)
+	if strings.HasPrefix(q, "//") || strings.HasPrefix(lower, "/?/unc/") || strings.HasPrefix(lower, "/./") || strings.HasPrefix(lower, "/?/globalroot") || strings.HasPrefix(lower, "/??/") || strings.Contains(lower, "volume{") || !absolute(q) {
 		return ErrInvalid
 	}
-	for _, part := range strings.FieldsFunc(strings.ReplaceAll(p, "\\", "/"), func(r rune) bool { return r == '/' }) {
-		trimmed := strings.TrimRight(part, ". ")
-		if part == ".." || part == "." || trimmed != part || reserved(trimmed) {
-			return ErrInvalid
+	parts := strings.Split(q, "/")
+	for i, part := range parts {
+		if i == 0 && len(part) == 2 && part[1] == ':' {
+			continue
+		}
+		if err := lexicalName(part); err != nil {
+			return err
 		}
 	}
-	if !filepath.IsAbs(p) {
+	if len(q) > 2 && strings.Contains(q[2:], ":") {
 		return ErrInvalid
 	}
 	return nil
 }
+func absolute(p string) bool {
+	return strings.HasPrefix(p, "/") || (len(p) >= 3 && p[1] == ':' && ((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) && p[2] == '/')
+}
+func lexicalName(part string) error {
+	if part == "" {
+		return nil
+	}
+	if part == "." || part == ".." || strings.TrimRight(part, ". ") != part || reserved(part) {
+		return ErrInvalid
+	}
+	for _, r := range part {
+		if r < 0x20 || strings.ContainsRune(`<>:"|?*`, r) {
+			return ErrInvalid
+		}
+	}
+	return nil
+}
 func reserved(s string) bool {
-	s = strings.ToUpper(strings.Split(s, ".")[0])
-	if s == "CON" || s == "PRN" || s == "AUX" || s == "NUL" {
+	s = strings.ToUpper(strings.TrimRight(strings.Split(s, ".")[0], " ."))
+	if s == "CON" || s == "PRN" || s == "AUX" || s == "NUL" || s == "CONIN$" || s == "CONOUT$" {
 		return true
 	}
-	if len(s) == 4 && (strings.HasPrefix(s, "COM") || strings.HasPrefix(s, "LPT")) && s[3] >= '1' && s[3] <= '9' {
-		return true
+	if len(s) == 4 && (strings.HasPrefix(s, "COM") || strings.HasPrefix(s, "LPT")) {
+		return s[3] >= '0' && s[3] <= '9'
+	}
+	if len([]rune(s)) == 4 && (strings.HasPrefix(s, "COM") || strings.HasPrefix(s, "LPT")) {
+		return strings.ContainsRune("¹²³", []rune(s)[3])
 	}
 	return false
 }
 func within(path, base string) bool {
-	p, b := filepath.Clean(path), filepath.Clean(base)
-	if samePath(p, b) {
-		return true
+	p, b := components(path), components(base)
+	if len(p) < len(b) {
+		return false
 	}
-	return strings.HasPrefix(strings.ToLower(p), strings.ToLower(b)+string(filepath.Separator))
+	for i := range b {
+		if !strings.EqualFold(p[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
-func samePath(a, b string) bool { return strings.EqualFold(filepath.Clean(a), filepath.Clean(b)) }
+func samePath(a, b string) bool {
+	pa, pb := components(a), components(b)
+	if len(pa) != len(pb) {
+		return false
+	}
+	for i := range pa {
+		if !strings.EqualFold(pa[i], pb[i]) {
+			return false
+		}
+	}
+	return true
+}
+func components(path string) []string {
+	p := strings.Trim(strings.ReplaceAll(filepath.Clean(path), "\\", "/"), "/")
+	if p == "" {
+		return nil
+	}
+	return strings.Split(p, "/")
+}

@@ -9,10 +9,32 @@ import (
 )
 
 func TestRejectsHostilePaths(t *testing.T) {
-	for _, path := range []string{`\\server\share\x`, `\\?\UNC\server\share\x`, `//server/share/x`, `\\.\PhysicalDrive0`, `\\?\GLOBALROOT\Device`, `C:\a\..\b`, `C:\x::$DATA`, `C:\CON`, `C:\COM1.txt`, `C:\name.`, `C:\name `, `relative\x`} {
+	for _, path := range []string{`\\server\share\x`, `\\?\UNC\server\share\x`, `//server/share/x`, `\\.\PhysicalDrive0`, `\\?\GLOBALROOT\Device`, `\??\C:\x`, `\\?\Volume{abc}\x`, `C:\a\..\b`, `C:/a\\..\\b`, "C:\\x\x00y", `C:\x::$DATA`, `C:\x::$INDEX_ALLOCATION`, `C:\x:stream`, `C:\CON`, `C:\CON .txt`, `C:\COM0.txt`, `C:\LPT¹`, `C:\name.`, `C:\name `, `C:\a<b`, `relative\x`} {
 		if lexical(path) == nil {
 			t.Errorf("accepted %q", path)
 		}
+	}
+}
+
+func TestComponentBoundariesAndAncestorProtection(t *testing.T) {
+	if within(`C:\Program Files (x86)`, `C:\Program Files`) {
+		t.Fatal("prefix is not a component")
+	}
+	if !within(`C:\Users\x`, `C:\`) {
+		t.Fatal("volume root must contain children")
+	}
+	root := t.TempDir()
+	protected := filepath.Join(root, "real", "protected")
+	if err := os.MkdirAll(protected, 0700); err != nil {
+		t.Fatal(err)
+	}
+	g := Guard{Roots: []string{root}, Protected: []string{protected}}
+	if _, err := g.Check(filepath.Join(root, "real"), true); !errors.Is(err, ErrProtected) {
+		t.Fatalf("ancestor: %v", err)
+	}
+	newPath, err := g.CheckNew(root, "new.txt", true)
+	if err != nil || filepath.Base(newPath) != "new.txt" {
+		t.Fatalf("CheckNew: %q, %v", newPath, err)
 	}
 }
 func TestProtectedAndRoot(t *testing.T) {
