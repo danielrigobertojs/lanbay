@@ -38,6 +38,9 @@ func ensureDataDir(path string) error {
 	if err := os.MkdirAll(path, 0700); err != nil {
 		return err
 	}
+	if err := rejectUnsafeRoot(path); err != nil {
+		return err
+	}
 	if existed {
 		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
 		if err != nil {
@@ -147,6 +150,28 @@ func rejectUnsafeEntry(path string, entry fs.DirEntry) error {
 	}
 	if info.NumberOfLinks > 1 {
 		return fmt.Errorf("unsafe hard-linked entry: %s", path)
+	}
+	return nil
+}
+
+func rejectUnsafeRoot(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
+		return fmt.Errorf("unsafe data directory: %s", path)
+	}
+	pointer, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	attrs, err := windows.GetFileAttributes(pointer)
+	if err != nil {
+		return err
+	}
+	if attrs&fileAttributeReparsePoint != 0 {
+		return fmt.Errorf("unsafe data directory: %s", path)
 	}
 	return nil
 }
