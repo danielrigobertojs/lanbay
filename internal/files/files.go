@@ -34,6 +34,7 @@ type Entry struct {
 	Size      int64     `json:"size"`
 	Modified  time.Time `json:"modified"`
 	Hidden    bool      `json:"hidden"`
+	System    bool      `json:"system"`
 }
 type ListOptions struct {
 	Page, PerPage  int
@@ -74,7 +75,15 @@ func (m Manager) List(ctx context.Context, client string, opt ListOptions) (List
 		if e != nil {
 			continue
 		}
-		items = append(items, Entry{Name: d.Name(), Path: filepath.Join(p, d.Name()), Directory: d.IsDir(), Size: info.Size(), Modified: info.ModTime(), Hidden: strings.HasPrefix(d.Name(), ".")})
+		path := filepath.Join(p, d.Name())
+		system, e := isSystem(path)
+		if e != nil {
+			continue // The entry changed while listing.
+		}
+		if !opt.System && system {
+			continue
+		}
+		items = append(items, Entry{Name: d.Name(), Path: path, Directory: d.IsDir(), Size: info.Size(), Modified: info.ModTime(), Hidden: strings.HasPrefix(d.Name(), "."), System: system})
 	}
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].Directory != items[j].Directory {

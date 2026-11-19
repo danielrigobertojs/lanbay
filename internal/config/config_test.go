@@ -39,6 +39,25 @@ func TestDefaultConfigurationPersistsOnlyNamedHosts(t *testing.T) {
 	}
 }
 
+func TestProtectedPathsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	c := Default(dir)
+	c.ProtectedPaths = []string{filepath.Join(dir, "keep")}
+	if err := os.Mkdir(c.ProtectedPaths[0], 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(c); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.ProtectedPaths) != 1 || got.ProtectedPaths[0] != c.ProtectedPaths[0] {
+		t.Fatalf("protected paths = %#v", got.ProtectedPaths)
+	}
+}
+
 func TestRuntimeHostsReturnsCopyOfCache(t *testing.T) {
 	hostCache.Lock()
 	hostCache.hosts = []string{"192.168.1.7"}
