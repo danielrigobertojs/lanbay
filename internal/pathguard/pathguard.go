@@ -53,6 +53,22 @@ func (g Guard) CheckNew(parent, name string, write bool) (string, error) {
 	return filepath.Join(p, name), nil
 }
 
+// CheckTransfer authorizes both ends of a copy or move. The source is checked
+// as a write because a successful move removes it, and a copy must not be used
+// to exfiltrate a protected zone. Callers must use CheckNew for a destination
+// leaf that does not exist yet.
+func (g Guard) CheckTransfer(source, destination string) (string, string, error) {
+	from, err := g.Check(source, true)
+	if err != nil {
+		return "", "", fmt.Errorf("authorize source: %w", err)
+	}
+	to, err := g.Check(destination, true)
+	if err != nil {
+		return "", "", fmt.Errorf("authorize destination: %w", err)
+	}
+	return from, to, nil
+}
+
 func (g Guard) authorize(path string, write bool) (string, error) {
 	p := filepath.Clean(path)
 	root := ""

@@ -54,3 +54,25 @@ func TestProtectedAndRoot(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 }
+
+func TestCheckTransferRejectsProtectedSourceAndDestination(t *testing.T) {
+	root := t.TempDir()
+	protected := filepath.Join(root, "Windows")
+	user := filepath.Join(root, "Users", "owner.txt")
+	if err := os.MkdirAll(filepath.Dir(user), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(protected, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(user, []byte("ok"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	g := Guard{Roots: []string{root}, Protected: []string{protected}}
+	if _, _, err := g.CheckTransfer(protected, user); !errors.Is(err, ErrProtected) {
+		t.Fatalf("protected source: %v", err)
+	}
+	if _, _, err := g.CheckTransfer(user, protected); !errors.Is(err, ErrProtected) {
+		t.Fatalf("protected destination: %v", err)
+	}
+}
