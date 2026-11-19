@@ -4,6 +4,8 @@ package auth
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
+	"golang.org/x/crypto/argon2"
 	_ "modernc.org/sqlite"
 	"net/netip"
 	"strings"
@@ -17,7 +19,7 @@ func manager(t *testing.T) *Manager {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = db.Exec("CREATE TABLE settings (key TEXT PRIMARY KEY,value TEXT NOT NULL)"); e != nil {
+	if _, e = db.Exec("CREATE TABLE settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE sessions (token_hash TEXT PRIMARY KEY, csrf_hash TEXT NOT NULL, created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL, expires_at INTEGER NOT NULL, change_required BOOLEAN NOT NULL)"); e != nil {
 		t.Fatal(e)
 	}
 	return New(db, time.Hour)
@@ -31,10 +33,10 @@ func TestPasswordLoginAndCSRF(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if ok, _ := m.Check(id, "", true); ok {
+	if ok, _ := m.Check(context.Background(), id, "", true); ok {
 		t.Fatal("missing CSRF accepted")
 	}
-	if ok, _ := m.Check(id, csrf, true); !ok {
+	if ok, _ := m.Check(context.Background(), id, csrf, true); !ok {
 		t.Fatal("valid session rejected")
 	}
 }
@@ -73,8 +75,66 @@ func TestCompletePasswordChange(t *testing.T) {
 	if err := m.SetPassword(context.Background(), "correct horse battery"); err != nil {
 		t.Fatal(err)
 	}
-	m.CompletePasswordChange(id)
-	if ok, stillRequired := m.Check(id, csrf, false); !ok || stillRequired {
+	m.CompletePasswordChange(context.Background(), id)
+	if ok, stillRequired := m.Check(context.Background(), id, csrf, false); !ok || stillRequired {
 		t.Fatalf("session after password change = %t, %t", ok, stillRequired)
+	}
+}
+
+func TestVerifyPasswordDoesNotCreateSession(t *testing.T) {
+	m := manager(t)
+	if err := m.SetPassword(context.Background(), "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	if !m.VerifyPassword(context.Background(), "correct horse battery") || m.VerifyPassword(context.Background(), "wrong password value") {
+		t.Fatal("password verification mismatch")
+	}
+	var sessions int
+	if err := m.db.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&sessions); err != nil || sessions != 0 {
+		t.Fatalf("sessions=%d err=%v", sessions, err)
+	}
+}
+
+func TestIPv6AttemptsShare64AndCleanup(t *testing.T) {
+	m := manager(t)
+	if attemptKey(netip.MustParseAddr("fd00::1")) != attemptKey(netip.MustParseAddr("fd00::2")) {
+		t.Fatal("/64 grouping missing")
+	}
+	m.attempts["old"] = &attempt{last: time.Now().Add(-25 * time.Hour)}
+	m.cleanup(time.Now())
+	if _, ok := m.attempts["old"]; ok {
+		t.Fatal("stale attempt not removed")
+	}
+}
+
+func TestGlobalFailureBudget(t *testing.T) {
+	m := manager(t)
+	now := time.Now()
+	for i := 0; i < 100; i++ {
+		m.fail("source"+string(rune(i)), now)
+	}
+	if !now.Before(m.global.blockedUntil) {
+		t.Fatal("global failure budget did not block")
+	}
+}
+
+func TestLoginRehashesLegacyPHCParameters(t *testing.T) {
+	m := manager(t)
+	salt := []byte("0123456789abcdef")
+	password := "correct horse battery"
+	hash := argon2.IDKey([]byte(password), salt, 1, 1024, 1, 32)
+	legacy := "$argon2id$v=19$m=1024,t=1,p=1$" + base64.RawStdEncoding.EncodeToString(salt) + "$" + base64.RawStdEncoding.EncodeToString(hash)
+	if _, err := m.db.Exec("INSERT INTO settings(key,value) VALUES('password_hash',?)", legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := m.Login(context.Background(), netip.MustParseAddr("10.0.0.1"), password); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := m.db.QueryRow("SELECT value FROM settings WHERE key='password_hash'").Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got == legacy {
+		t.Fatal("legacy PHC was not rehashed")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -14,6 +15,19 @@ import (
 	"os"
 	"time"
 )
+
+func CertificateFingerprint(certFile string) (string, error) {
+	data, err := os.ReadFile(certFile)
+	if err != nil {
+		return "", err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return "", fmt.Errorf("decode certificate")
+	}
+	sum := sha256.Sum256(block.Bytes)
+	return fmt.Sprintf("SHA-256:%x", sum[:]), nil
+}
 
 func EnsureCertificate(certFile, keyFile string) (string, error) {
 	if _, e := os.Stat(certFile); e == nil {
