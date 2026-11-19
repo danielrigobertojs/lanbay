@@ -18,3 +18,8 @@ func DefaultDataDir() string {
 	}
 	return filepath.Join(dir, "Lanbay")
 }
+
+func ensureDataDir(path string) error { return os.MkdirAll(path, 0700) }
+
+// ProtectFile applies the development-platform owner-only mode.
+func ProtectFile(path string) error { return os.Chmod(path, 0600) }

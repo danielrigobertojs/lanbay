@@ -66,3 +66,13 @@ jobs:
           if (-not (Get-ChildItem m0-results -Recurse -Filter '*.zip' -ErrorAction SilentlyContinue)) { throw 'kitserver did not receive result zip' }
           Expand-Archive (Get-ChildItem m0-results -Recurse -Filter '*.zip' | Select-Object -First 1).FullName -DestinationPath received-results
           if (-not (Test-Path received-results/with-microsd.json)) { throw 'volume spike report missing' }
+
+  pathguard-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.26.x' }
+      - name: Run adversarial pathguard suite on Windows
+        shell: pwsh
+        run: go test -count=1 ./internal/pathguard/...

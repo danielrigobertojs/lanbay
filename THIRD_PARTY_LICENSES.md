@@ -12,6 +12,7 @@ Modules reachable from production Go packages for the Windows amd64 build; test-
 - `github.com/remyoudompheng/bigfft` v0.0.0-20230129092748-24d4a6f8daec — SPDX: BSD-3-Clause.
 - `golang.org/x/crypto` v0.48.0 — SPDX: BSD-3-Clause.
 - `golang.org/x/sys` v0.50.0 — SPDX: BSD-3-Clause.
+- `golang.org/x/term` v0.48.0 — SPDX: BSD-3-Clause.
 - `modernc.org/libc` v1.80.1 — SPDX: BSD-3-Clause.
 - `modernc.org/mathutil` v1.7.1 — SPDX: BSD-3-Clause.
 - `modernc.org/memory` v1.12.1 — SPDX: BSD-3-Clause.

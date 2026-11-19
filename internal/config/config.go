@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -22,24 +23,41 @@ type Config struct {
 	AllowedNetworks  []netip.Prefix
 	SessionIdle      time.Duration
 	DiskAlertPercent int
+	AllowedHosts     []string
 }
 
 func Default(dataDir string) Config {
-	return Config{DataDir: dataDir, Listen: ":8443", CertificateFile: filepath.Join(dataDir, "tls-cert.pem"), KeyFile: filepath.Join(dataDir, "tls-key.pem"), AllowedNetworks: DefaultNetworks(), SessionIdle: 12 * time.Hour, DiskAlertPercent: 90}
+	return Config{DataDir: dataDir, Listen: ":8443", CertificateFile: filepath.Join(dataDir, "tls-cert.pem"), KeyFile: filepath.Join(dataDir, "tls-key.pem"), AllowedNetworks: DefaultNetworks(), AllowedHosts: DefaultHosts(), SessionIdle: 12 * time.Hour, DiskAlertPercent: 90}
+}
+func DefaultHosts() []string {
+	h, _ := os.Hostname()
+	result := []string{"localhost", "127.0.0.1", "::1", h, h + ".local"}
+	result = append(result, interfaceIPs()...)
+	return result
+}
+func interfaceIPs() []string {
+	addrs, _ := net.InterfaceAddrs()
+	var result []string
+	for _, a := range addrs {
+		if ip, _, err := net.ParseCIDR(a.String()); err == nil && !ip.IsLoopback() {
+			result = append(result, ip.String())
+		}
+	}
+	return result
 }
 
 func DefaultNetworks() []netip.Prefix {
-	return []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128"), netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("172.16.0.0/12"), netip.MustParsePrefix("192.168.0.0/16"), netip.MustParsePrefix("169.254.0.0/16"), netip.MustParsePrefix("fe80::/10"), netip.MustParsePrefix("100.64.0.0/10"), netip.MustParsePrefix("fc00::/7")}
+	return []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128"), netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("172.16.0.0/12"), netip.MustParsePrefix("192.168.0.0/16"), netip.MustParsePrefix("169.254.0.0/16"), netip.MustParsePrefix("fe80::/10"), netip.MustParsePrefix("fc00::/7")}
 }
 
 func Load(dataDir string) (Config, error) {
 	c := Default(dataDir)
+	if err := ensureDataDir(dataDir); err != nil {
+		return c, fmt.Errorf("secure data directory: %w", err)
+	}
 	path := filepath.Join(dataDir, fileName)
 	b, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		if err := os.MkdirAll(dataDir, 0700); err != nil {
-			return c, fmt.Errorf("create data directory: %w", err)
-		}
 		return c, Save(c)
 	}
 	if err != nil {
@@ -76,21 +94,38 @@ func Load(dataDir string) (Config, error) {
 				return c, e
 			}
 			c.AllowedNetworks = prefixes
+		case "allowed_hosts":
+			c.AllowedHosts = splitStrings(value)
 		}
 	}
 	return c, nil
 }
 
 func Save(c Config) error {
-	if err := os.MkdirAll(c.DataDir, 0700); err != nil {
+	if err := ensureDataDir(c.DataDir); err != nil {
 		return fmt.Errorf("create data directory: %w", err)
 	}
 	prefixes := make([]string, 0, len(c.AllowedNetworks))
 	for _, p := range c.AllowedNetworks {
 		prefixes = append(prefixes, "\""+p.String()+"\"")
 	}
-	content := fmt.Sprintf("listen = %q\ncertificate_file = %q\nkey_file = %q\nsession_idle_hours = %d\ndisk_alert_percent = %d\nallowed_networks = [%s]\n", c.Listen, c.CertificateFile, c.KeyFile, int(c.SessionIdle.Hours()), c.DiskAlertPercent, strings.Join(prefixes, ", "))
+	hosts := make([]string, 0, len(c.AllowedHosts))
+	for _, host := range c.AllowedHosts {
+		hosts = append(hosts, "\""+host+"\"")
+	}
+	content := fmt.Sprintf("listen = %q\ncertificate_file = %q\nkey_file = %q\nsession_idle_hours = %d\ndisk_alert_percent = %d\nallowed_networks = [%s]\nallowed_hosts = [%s]\n", c.Listen, c.CertificateFile, c.KeyFile, int(c.SessionIdle.Hours()), c.DiskAlertPercent, strings.Join(prefixes, ", "), strings.Join(hosts, ", "))
 	return os.WriteFile(filepath.Join(c.DataDir, fileName), []byte(content), 0600)
+}
+func splitStrings(value string) []string {
+	value = strings.Trim(value, "[] ")
+	if value == "" {
+		return nil
+	}
+	var result []string
+	for _, item := range strings.Split(value, ",") {
+		result = append(result, strings.Trim(strings.TrimSpace(item), "\""))
+	}
+	return result
 }
 
 func parsePrefixes(value string) ([]netip.Prefix, error) {

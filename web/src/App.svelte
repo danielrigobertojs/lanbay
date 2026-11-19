@@ -1,6 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <script>
   let password = ''
+  let currentPassword = ''
   let csrf = ''
   let error = ''
   let volumes = []
@@ -16,8 +17,8 @@
     if (!changing) await refresh()
   }
   async function changePassword() {
-    const response = await fetch('/api/v1/auth/password', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify({ password }) })
-    if (!response.ok) { error = await response.text(); return }; changing = false; password = ''; await refresh()
+    const response = await fetch('/api/v1/auth/password', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify({ current_password: currentPassword, password }) })
+    if (!response.ok) { error = await response.text(); return }; changing = false; password = ''; currentPassword = ''; await refresh()
   }
   async function refresh() {
     const [systemResponse, volumeResponse] = await Promise.all([fetch('/api/v1/system'), fetch('/api/v1/volumes')])
@@ -30,9 +31,9 @@
 {#if !csrf}
   <main class="login"><section><p class="eyebrow">PANEL LAN</p><h1>Lanbay</h1><p>Administra el equipo desde tu red local.</p><label>Contraseña <input type="password" bind:value={password} on:keydown={(event) => event.key === 'Enter' && login()} /></label>{#if error}<p class="error">{error}</p>{/if}<button on:click={login}>Iniciar sesión</button></section></main>
 {:else if changing}
-  <main class="login"><section><p class="eyebrow">PRIMER ACCESO</p><h1>Cambia la contraseña</h1><label>Nueva contraseña (12 caracteres mínimo)<input type="password" bind:value={password} /></label>{#if error}<p class="error">{error}</p>{/if}<button on:click={changePassword}>Guardar contraseña</button></section></main>
+  <main class="login"><section><p class="eyebrow">PRIMER ACCESO</p><h1>Cambia la contraseña</h1><label>Contraseña actual<input type="password" bind:value={currentPassword} /></label><label>Nueva contraseña (12 caracteres mínimo)<input type="password" bind:value={password} /></label>{#if error}<p class="error">{error}</p>{/if}<button on:click={changePassword}>Guardar contraseña</button></section></main>
 {:else}
-  <main><header><div><p class="eyebrow">ALMACENAMIENTO</p><h1>Buenas, {system?.hostname || 'Lanbay'}</h1><p>Actualización automática cada 30 segundos.</p></div><button class="secondary" on:click={refresh}>Actualizar</button></header><section class="summary"><span>Equipo: {system?.platform || '—'}</span><span>Versión: {system?.version || '—'}</span></section><section class="grid">{#each volumes as volume}<article class:warning={volume.used_percent >= alertPercent}><div class="card-header"><span class="disk">{volume.id}</span><span>{volume.type}</span></div><h2>{volume.label || 'Volumen local'}</h2><div class="meter"><i style={`width:${volume.used_percent}%`}></i></div><strong>{volume.used_percent}% usado</strong><p>{format(volume.used())} usados de {format(volume.total)}</p><footer><span>{volume.filesystem}</span><span>{format(volume.free)} libres</span></footer>{#if volume.recycle}<small>Papelera disponible</small>{:else}<small class="muted">Borrado permanente requiere confirmación</small>{/if}</article>{:else}<p>No hay volúmenes locales disponibles.</p>{/each}</section></main>
+  <main><header><div><p class="eyebrow">ALMACENAMIENTO</p><h1>Buenas, {system?.hostname || 'Lanbay'}</h1><p>Actualización automática cada 30 segundos.</p></div><button class="secondary" on:click={refresh}>Actualizar</button></header><section class="summary"><span>Equipo: {system?.platform || '—'}</span><span>Versión: {system?.version || '—'}</span><span>Certificado: {system?.certificate_fingerprint || '—'}</span></section><section class="grid">{#each volumes as volume}<article class:warning={volume.used_percent >= alertPercent}><div class="card-header"><span class="disk">{volume.id}</span><span>{volume.type}</span></div><h2>{volume.label || 'Volumen local'}</h2><div class="meter"><i style={`width:${volume.used_percent}%`}></i></div><strong>{volume.used_percent}% usado</strong><p>{format(volume.used())} usados de {format(volume.total)}</p><footer><span>{volume.filesystem}</span><span>{format(volume.free)} libres</span></footer>{#if volume.recycle}<small>Papelera disponible</small>{:else}<small class="muted">Borrado permanente requiere confirmación</small>{/if}</article>{:else}<p>No hay volúmenes locales disponibles.</p>{/each}</section></main>
 {/if}
 
 <style>

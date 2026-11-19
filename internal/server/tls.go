@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -14,6 +15,19 @@ import (
 	"os"
 	"time"
 )
+
+func CertificateFingerprint(certFile string) (string, error) {
+	data, err := os.ReadFile(certFile)
+	if err != nil {
+		return "", err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return "", fmt.Errorf("decode certificate")
+	}
+	sum := sha256.Sum256(block.Bytes)
+	return fmt.Sprintf("SHA-256:%x", sum[:]), nil
+}
 
 func EnsureCertificate(certFile, keyFile string) (string, error) {
 	if _, e := os.Stat(certFile); e == nil {
@@ -30,7 +44,8 @@ func EnsureCertificate(certFile, keyFile string) (string, error) {
 		return "", e
 	}
 	host, _ := os.Hostname()
-	template := x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "Lanbay"}, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().AddDate(3, 0, 0), KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, DNSNames: []string{host, "localhost"}, IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback}}
+	notBefore := time.Now().Add(-time.Minute)
+	template := x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "Lanbay"}, NotBefore: notBefore, NotAfter: notBefore.Add(824 * 24 * time.Hour), KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, DNSNames: []string{host, host + ".local", "localhost"}, IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback}}
 	template.IPAddresses = append(template.IPAddresses, interfaces()...)
 	der, e := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
 	if e != nil {
