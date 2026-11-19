@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// Package files contains filesystem operations guarded by pathguard.
+// Package files implements guarded file operations for the HTTP API.
 package files
 
 import (
+	"archive/zip"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,173 +16,246 @@ import (
 	"github.com/danielrigobertojs/lanbay/internal/pathguard"
 )
 
-var ErrDirectoryCopy = errors.New("directory_copy_not_supported")
-
-// Entry is the server-side representation used for a paginated directory.
 type Entry struct {
 	Name      string    `json:"name"`
+	Path      string    `json:"path"`
 	Directory bool      `json:"directory"`
 	Size      int64     `json:"size"`
 	Modified  time.Time `json:"modified"`
 	Hidden    bool      `json:"hidden"`
 }
-
 type ListOptions struct {
-	Offset     int
-	Limit      int
-	ShowHidden bool
-	Sort       string
-	Descending bool
+	Page, PerPage  int
+	Limit          int
+	Sort           string
+	Hidden, System bool
 }
-
-type Page struct {
-	Path    string  `json:"path"`
+type Listing struct {
 	Entries []Entry `json:"entries"`
 	Total   int     `json:"total"`
+	Page    int     `json:"page"`
+	PerPage int     `json:"per_page"`
 }
+type Manager struct{ Guard pathguard.Guard }
+type Service = Manager
 
-// Service is deliberately the only filesystem API exposed to HTTP handlers.
-// Every public method authorizes client-controlled paths through Guard.
-type Service struct{ Guard pathguard.Guard }
-
-func (s Service) List(ctx context.Context, clientPath string, options ListOptions) (Page, error) {
-	path, err := s.Guard.Check(clientPath, false)
+func (m Manager) List(ctx context.Context, client string, opt ListOptions) (Listing, error) {
+	p, err := m.Guard.Check(client, false)
 	if err != nil {
-		return Page{}, fmt.Errorf("authorize directory: %w", err)
+		return Listing{}, err
 	}
-	entries, err := os.ReadDir(path)
+	dirs, err := os.ReadDir(p)
 	if err != nil {
-		return Page{}, fmt.Errorf("read directory: %w", err)
+		return Listing{}, fmt.Errorf("read directory: %w", err)
 	}
-	page := Page{Path: path}
-	for _, item := range entries {
+	items := make([]Entry, 0, len(dirs))
+	for _, d := range dirs {
 		if err := ctx.Err(); err != nil {
-			return Page{}, err
+			return Listing{}, err
 		}
-		hidden := strings.HasPrefix(item.Name(), ".")
-		if hidden && !options.ShowHidden {
+		if !opt.Hidden && strings.HasPrefix(d.Name(), ".") {
 			continue
 		}
-		info, err := item.Info()
-		if err != nil {
+		info, e := d.Info()
+		if e != nil {
 			continue
 		}
-		page.Entries = append(page.Entries, Entry{Name: item.Name(), Directory: item.IsDir(), Size: info.Size(), Modified: info.ModTime(), Hidden: hidden})
+		items = append(items, Entry{Name: d.Name(), Path: filepath.Join(p, d.Name()), Directory: d.IsDir(), Size: info.Size(), Modified: info.ModTime(), Hidden: strings.HasPrefix(d.Name(), ".")})
 	}
-	sortEntries(page.Entries, options)
-	page.Total = len(page.Entries)
-	if options.Offset < 0 {
-		options.Offset = 0
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Directory != items[j].Directory {
+			return items[i].Directory
+		}
+		if opt.Sort == "modified" {
+			return items[i].Modified.After(items[j].Modified)
+		}
+		if opt.Sort == "size" {
+			return items[i].Size > items[j].Size
+		}
+		return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
+	})
+	if opt.Limit > 0 {
+		opt.PerPage = opt.Limit
 	}
-	if options.Limit <= 0 || options.Limit > 1000 {
-		options.Limit = 1000
+	if opt.PerPage < 1 || opt.PerPage > 1000 {
+		opt.PerPage = 100
 	}
-	if options.Offset >= len(page.Entries) {
-		page.Entries = nil
-		return page, nil
+	if opt.Page < 1 {
+		opt.Page = 1
 	}
-	end := options.Offset + options.Limit
-	if end > len(page.Entries) {
-		end = len(page.Entries)
+	start := (opt.Page - 1) * opt.PerPage
+	if start > len(items) {
+		start = len(items)
 	}
-	page.Entries = page.Entries[options.Offset:end]
-	return page, nil
+	end := start + opt.PerPage
+	if end > len(items) {
+		end = len(items)
+	}
+	return Listing{Entries: items[start:end], Total: len(items), Page: opt.Page, PerPage: opt.PerPage}, nil
 }
-
-func (s Service) Mkdir(ctx context.Context, parent, name string) (string, error) {
+func (m Manager) Mkdir(ctx context.Context, parent, name string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	path, err := s.Guard.CheckNew(parent, name, true)
+	p, err := m.Guard.CheckNew(parent, name, true)
 	if err != nil {
-		return "", fmt.Errorf("authorize new directory: %w", err)
+		return "", err
 	}
-	if err := os.Mkdir(path, 0700); err != nil {
-		return "", fmt.Errorf("create directory: %w", err)
-	}
-	return path, nil
+	return p, os.Mkdir(p, 0750)
 }
-
-func (s Service) Rename(ctx context.Context, source, parent, name string) (string, error) {
+func (m Manager) Rename(ctx context.Context, source string, args ...string) (string, error) {
+	if len(args) < 1 || len(args) > 2 {
+		return "", fmt.Errorf("rename requires name or parent and name")
+	}
+	parent, name := filepath.Dir(source), args[0]
+	if len(args) == 2 {
+		parent, name = args[0], args[1]
+	}
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	from, err := s.Guard.Check(source, true)
+	src, err := m.Guard.Check(source, true)
 	if err != nil {
-		return "", fmt.Errorf("authorize source: %w", err)
-	}
-	to, err := s.Guard.CheckNew(parent, name, true)
-	if err != nil {
-		return "", fmt.Errorf("authorize destination: %w", err)
-	}
-	if err := os.Rename(from, to); err != nil {
-		return "", fmt.Errorf("rename: %w", err)
-	}
-	return to, nil
-}
-
-func (s Service) CopyFile(ctx context.Context, source, parent, name string) (string, error) {
-	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	from, err := s.Guard.Check(source, false)
+	dst, err := m.Guard.CheckNew(parent, name, true)
 	if err != nil {
-		return "", fmt.Errorf("authorize source: %w", err)
+		return "", err
 	}
-	to, err := s.Guard.CheckNew(parent, name, true)
-	if err != nil {
-		return "", fmt.Errorf("authorize destination: %w", err)
+	return dst, os.Rename(src, dst)
+}
+func (m Manager) Move(ctx context.Context, source, parent, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	info, err := os.Stat(from)
+	src, err := m.Guard.Check(source, true)
 	if err != nil {
-		return "", fmt.Errorf("stat source: %w", err)
+		return err
+	}
+	dst, err := m.Guard.CheckNew(parent, name, true)
+	if err != nil {
+		return err
+	}
+	return os.Rename(src, dst)
+}
+func (m Manager) Copy(ctx context.Context, source, parent, name string) error {
+	src, err := m.Guard.Check(source, false)
+	if err != nil {
+		return err
+	}
+	dst, err := m.Guard.CheckNew(parent, name, true)
+	if err != nil {
+		return err
+	}
+	return copyPath(ctx, src, dst)
+}
+func (m Manager) CopyFile(ctx context.Context, source, parent, name string) (string, error) {
+	dst, err := m.Guard.CheckNew(parent, name, true)
+	if err != nil {
+		return "", err
+	}
+	src, err := m.Guard.Check(source, false)
+	if err != nil {
+		return "", err
+	}
+	return dst, copyPath(ctx, src, dst)
+}
+func (m Manager) Delete(ctx context.Context, source string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p, err := m.Guard.Check(source, true)
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(p)
+}
+
+// Open resolves a file for a download. Directories are rejected so callers
+// must use Zip, keeping content-disposition policy at the HTTP boundary.
+func (m Manager) Open(client string) (*os.File, os.FileInfo, error) {
+	p, err := m.Guard.Check(client, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := f.Stat()
+	if err != nil || info.IsDir() {
+		_ = f.Close()
+		if err == nil {
+			err = fmt.Errorf("path is a directory")
+		}
+		return nil, nil, err
+	}
+	return f, info, nil
+}
+func copyPath(ctx context.Context, src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
 	}
 	if info.IsDir() {
-		return "", ErrDirectoryCopy
+		if err = os.Mkdir(dst, info.Mode()); err != nil {
+			return err
+		}
+		items, err := os.ReadDir(src)
+		if err != nil {
+			return err
+		}
+		for _, item := range items {
+			if err := copyPath(ctx, filepath.Join(src, item.Name()), filepath.Join(dst, item.Name())); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
-	in, err := os.Open(from)
+	in, err := os.Open(src)
 	if err != nil {
-		return "", fmt.Errorf("open source: %w", err)
+		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode())
 	if err != nil {
-		return "", fmt.Errorf("create destination: %w", err)
+		return err
 	}
-	_, copyErr := io.Copy(out, in)
+	_, err = io.Copy(out, in)
 	closeErr := out.Close()
-	if copyErr != nil {
-		_ = os.Remove(to)
-		return "", fmt.Errorf("copy file: %w", copyErr)
+	if err != nil {
+		return err
 	}
-	if closeErr != nil {
-		_ = os.Remove(to)
-		return "", fmt.Errorf("close destination: %w", closeErr)
-	}
-	return to, nil
+	return closeErr
 }
-
-func sortEntries(entries []Entry, options ListOptions) {
-	sort.SliceStable(entries, func(i, j int) bool {
-		a, b := entries[i], entries[j]
-		if a.Directory != b.Directory {
-			return a.Directory
+func (m Manager) Zip(ctx context.Context, client string, out io.Writer) error {
+	p, err := m.Guard.Check(client, false)
+	if err != nil {
+		return err
+	}
+	z := zip.NewWriter(out)
+	defer z.Close()
+	return filepath.Walk(p, func(name string, info os.FileInfo, e error) error {
+		if e != nil {
+			return e
 		}
-		var less bool
-		switch options.Sort {
-		case "size":
-			less = a.Size < b.Size
-		case "modified":
-			less = a.Modified.Before(b.Modified)
-		default:
-			less = strings.ToLower(a.Name) < strings.ToLower(b.Name)
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		if options.Descending {
-			return !less
+		if info.IsDir() {
+			return nil
 		}
-		return less
+		rel, _ := filepath.Rel(filepath.Dir(p), name)
+		w, e := z.Create(rel)
+		if e != nil {
+			return e
+		}
+		f, e := os.Open(name)
+		if e != nil {
+			return e
+		}
+		defer f.Close()
+		_, e = io.Copy(w, f)
+		return e
 	})
 }
-
-// Parent returns a client path suitable for use as a destination parent.
-func Parent(path string) string { return filepath.Dir(path) }
