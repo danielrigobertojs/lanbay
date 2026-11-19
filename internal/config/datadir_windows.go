@@ -50,7 +50,14 @@ func ensureDataDir(path string) error {
 		if !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
 			return os.ErrPermission
 		}
-		return nil
+		if secure, err := hasSecureDACL(path); err != nil {
+			return err
+		} else if secure {
+			return nil
+		}
+	}
+	if err := protectPath(path, true); err != nil {
+		return err
 	}
 	return filepath.WalkDir(path, func(file string, entry os.DirEntry, err error) error {
 		if err != nil {
@@ -114,26 +121,62 @@ func protectPath(path string, inherit bool) error {
 	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, admins, nil, acl, nil); err != nil {
 		return err
 	}
-	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	secure, err := hasSecureDACL(path)
 	if err != nil {
 		return err
 	}
-	control, _, err := sd.Control()
-	if err != nil {
-		return err
-	}
-	dacl, _, err := sd.DACL()
-	if err != nil {
-		return err
-	}
-	owner, _, err := sd.Owner()
-	if err != nil {
-		return err
-	}
-	if control&windows.SE_DACL_PROTECTED == 0 || dacl == nil || dacl.AceCount != 2 || !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+	if !secure {
 		return os.ErrPermission
 	}
 	return nil
+}
+
+func hasSecureDACL(path string) (bool, error) {
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, err
+	}
+	control, _, err := sd.Control()
+	if err != nil {
+		return false, err
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return false, err
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return false, err
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 || dacl == nil || dacl.AceCount != 2 || !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+		return false, nil
+	}
+	admins, system := false, false
+	for i := uint16(0); i < dacl.AceCount; i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
+			return false, err
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Mask != windows.GENERIC_ALL {
+			return false, nil
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		switch {
+		case sid.IsWellKnown(windows.WinBuiltinAdministratorsSid):
+			if admins {
+				return false, nil
+			}
+			admins = true
+		case sid.IsWellKnown(windows.WinLocalSystemSid):
+			if system {
+				return false, nil
+			}
+			system = true
+		default:
+			return false, nil
+		}
+	}
+	return admins && system, nil
 }
 
 // rejectUnsafeEntry prevents a privileged migration from following a junction,

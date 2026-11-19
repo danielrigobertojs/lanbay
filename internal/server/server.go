@@ -365,17 +365,27 @@ func (s *Server) password(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cookie, _ := r.Cookie(auth.CookieName)
-	if !s.auth.VerifyPasswordForSession(r.Context(), cookie.Value, in.CurrentPassword) {
-		s.audit(r, "password_change", "failed")
+	verified, failed := s.auth.VerifyPasswordForSession(r.Context(), cookie.Value, in.CurrentPassword)
+	if !verified {
+		if failed {
+			s.audit(r, "password_change", "failed")
+		}
 		http.Error(w, "credenciales no válidas", http.StatusUnauthorized)
 		return
 	}
-	if e := s.SetPassword(r.Context(), in.Password); e != nil {
+	changed, e := s.auth.ChangePasswordForSession(r.Context(), cookie.Value, in.Password)
+	if e != nil {
 		http.Error(w, e.Error(), 400)
 		return
 	}
-	s.auth.CompletePasswordChange(r.Context(), cookie.Value)
-	s.auth.RevokeOtherSessions(r.Context(), cookie.Value)
+	if !changed {
+		http.Error(w, "sesión no válida o CSRF inválido", http.StatusUnauthorized)
+		return
+	}
+	if e := os.Remove(filepath.Join(s.config.DataDir, "initial-password.txt")); e != nil && !os.IsNotExist(e) {
+		http.Error(w, e.Error(), http.StatusBadRequest)
+		return
+	}
 	s.audit(r, "password_change", "ok")
 	w.WriteHeader(http.StatusNoContent)
 }

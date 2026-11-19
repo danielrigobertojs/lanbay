@@ -9,6 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -105,18 +106,79 @@ func TestVerifyPasswordForSessionRevokesAfterFiveFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 4; i++ {
-		if m.VerifyPasswordForSession(context.Background(), id, "wrong password value") {
+		if ok, _ := m.VerifyPasswordForSession(context.Background(), id, "wrong password value"); ok {
 			t.Fatal("wrong password accepted")
 		}
 		if ok, _ := m.Check(context.Background(), id, csrf, false); !ok {
 			t.Fatalf("session revoked after %d failures", i+1)
 		}
 	}
-	if m.VerifyPasswordForSession(context.Background(), id, "wrong password value") {
+	if ok, _ := m.VerifyPasswordForSession(context.Background(), id, "wrong password value"); ok {
 		t.Fatal("wrong password accepted")
 	}
 	if ok, _ := m.Check(context.Background(), id, csrf, false); ok {
 		t.Fatal("session remains valid after five failures")
+	}
+}
+
+func TestVerifyPasswordForSessionReservesConcurrentAttempts(t *testing.T) {
+	m := manager(t)
+	if err := m.SetPassword(context.Background(), "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	id, csrf, _, err := m.Login(context.Background(), netip.MustParseAddr("10.0.0.8"), "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const requests = 20
+	start := make(chan struct{})
+	results := make(chan bool, requests)
+	var wg sync.WaitGroup
+	for range requests {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, failed := m.VerifyPasswordForSession(context.Background(), id, "wrong password value")
+			results <- failed
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	failed := 0
+	for result := range results {
+		if result {
+			failed++
+		}
+	}
+	if failed != 5 {
+		t.Fatalf("hashed failures = %d, want 5", failed)
+	}
+	if ok, _ := m.Check(context.Background(), id, csrf, false); ok {
+		t.Fatal("session remains valid after concurrent failures")
+	}
+	if ok, failed := m.VerifyPasswordForSession(context.Background(), id, "correct horse battery"); ok || failed {
+		t.Fatalf("correct password after revocation = %t, failed = %t", ok, failed)
+	}
+}
+
+func TestChangePasswordForSessionRequiresExistingSession(t *testing.T) {
+	m := manager(t)
+	if err := m.SetPassword(context.Background(), "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	id, _, _, err := m.Login(context.Background(), netip.MustParseAddr("10.0.0.8"), "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Logout(context.Background(), id)
+	changed, err := m.ChangePasswordForSession(context.Background(), id, "new correct battery")
+	if err != nil || changed {
+		t.Fatalf("changed = %t, err = %v", changed, err)
+	}
+	if !m.VerifyPassword(context.Background(), "correct horse battery") || m.VerifyPassword(context.Background(), "new correct battery") {
+		t.Fatal("password changed after session revocation")
 	}
 }
 
