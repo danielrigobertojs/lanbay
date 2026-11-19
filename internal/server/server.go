@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -59,6 +60,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/files/move", s.fileMove)
 	mux.HandleFunc("POST /api/v1/files/copy", s.fileCopy)
 	mux.HandleFunc("DELETE /api/v1/files", s.fileDelete)
+	mux.HandleFunc("GET /api/v1/files/download", s.fileDownload)
 	mux.Handle("GET /", lanbayweb.Handler())
 	return s.network(s.log(mux))
 }
@@ -173,6 +175,36 @@ func (s *Server) fileDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+func (s *Server) fileDownload(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, false) {
+		return
+	}
+	m, err := s.fileManager(r.Context())
+	if err != nil {
+		http.Error(w, "no se pudieron enumerar los volúmenes", 500)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if r.URL.Query().Get("zip") == "true" {
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", `attachment; filename="lanbay-download.zip"`)
+		w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
+		if err := m.Zip(r.Context(), path, w); err != nil {
+			fileError(w, err)
+		}
+		return
+	}
+	f, info, err := m.Open(path)
+	if err != nil {
+		fileError(w, err)
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(filepath.Base(info.Name())))
+	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 }
 func fileError(w http.ResponseWriter, e error) {
 	code := http.StatusBadRequest

@@ -147,6 +147,28 @@ func (m Manager) Delete(ctx context.Context, source string) error {
 	}
 	return os.RemoveAll(p)
 }
+
+// Open resolves a file for a download. Directories are rejected so callers
+// must use Zip, keeping content-disposition policy at the HTTP boundary.
+func (m Manager) Open(client string) (*os.File, os.FileInfo, error) {
+	p, err := m.Guard.Check(client, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := f.Stat()
+	if err != nil || info.IsDir() {
+		_ = f.Close()
+		if err == nil {
+			err = fmt.Errorf("path is a directory")
+		}
+		return nil, nil, err
+	}
+	return f, info, nil
+}
 func copyPath(ctx context.Context, src, dst string) error {
 	info, err := os.Stat(src)
 	if err != nil {
