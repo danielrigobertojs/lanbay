@@ -34,19 +34,16 @@ func DefaultNetworks() []netip.Prefix {
 
 func Load(dataDir string) (Config, error) {
 	c := Default(dataDir)
+	if err := ensureDataDir(dataDir); err != nil {
+		return c, fmt.Errorf("secure data directory: %w", err)
+	}
 	path := filepath.Join(dataDir, fileName)
 	b, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		if err := ensureDataDir(dataDir); err != nil {
-			return c, fmt.Errorf("create data directory: %w", err)
-		}
 		return c, Save(c)
 	}
 	if err != nil {
 		return c, fmt.Errorf("read config: %w", err)
-	}
-	if err := ensureDataDir(dataDir); err != nil {
-		return c, fmt.Errorf("verify data directory: %w", err)
 	}
 	for _, line := range strings.Split(string(b), "\n") {
 		parts := strings.SplitN(strings.TrimSpace(line), "=", 2)
