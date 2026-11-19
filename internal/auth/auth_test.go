@@ -138,3 +138,52 @@ func TestLoginRehashesLegacyPHCParameters(t *testing.T) {
 		t.Fatal("legacy PHC was not rehashed")
 	}
 }
+
+func TestMalformedPHCIsRejected(t *testing.T) {
+	m := manager(t)
+	if _, err := m.db.Exec("INSERT INTO settings(key,value) VALUES('password_hash','not-a-phc')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := m.Login(context.Background(), netip.MustParseAddr("10.0.0.1"), "correct horse battery"); err == nil {
+		t.Fatal("malformed PHC accepted")
+	}
+}
+
+func TestSessionIdleAndAbsoluteExpiry(t *testing.T) {
+	m := manager(t)
+	now := time.Now()
+	m.now = func() time.Time { return now }
+	if err := m.SetPassword(context.Background(), "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	id, csrf, _, err := m.Login(context.Background(), netip.MustParseAddr("10.0.0.1"), "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Hour + time.Second)
+	if ok, _ := m.Check(context.Background(), id, csrf, false); ok {
+		t.Fatal("idle session accepted")
+	}
+	id, csrf, _, err = m.Login(context.Background(), netip.MustParseAddr("10.0.0.1"), "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(absoluteLifetime + time.Second)
+	if ok, _ := m.Check(context.Background(), id, csrf, false); ok {
+		t.Fatal("absolute expiry accepted")
+	}
+}
+
+func TestRevokeOtherSessions(t *testing.T) {
+	m := manager(t)
+	_ = m.SetPassword(context.Background(), "correct horse battery")
+	a, csrfA, _, _ := m.Login(context.Background(), netip.MustParseAddr("10.0.0.1"), "correct horse battery")
+	b, csrfB, _, _ := m.Login(context.Background(), netip.MustParseAddr("10.0.0.2"), "correct horse battery")
+	m.RevokeOtherSessions(context.Background(), a)
+	if ok, _ := m.Check(context.Background(), a, csrfA, false); !ok {
+		t.Fatal("kept session revoked")
+	}
+	if ok, _ := m.Check(context.Background(), b, csrfB, false); ok {
+		t.Fatal("other session remains")
+	}
+}
