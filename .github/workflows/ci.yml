@@ -79,3 +79,6 @@ jobs:
       - name: Run secure data-directory suite on Windows
         shell: pwsh
         run: go test -count=1 ./internal/config/...
+      - name: Run SQLite store suite on Windows
+        shell: pwsh
+        run: go test -count=1 ./internal/store/...
