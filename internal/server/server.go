@@ -37,7 +37,14 @@ func New(c config.Config, db *sql.DB, provider volumes.Provider, version string)
 }
 func (s *Server) Initialize(ctx context.Context) (string, error) { return s.auth.EnsurePassword(ctx) }
 func (s *Server) SetPassword(ctx context.Context, password string) error {
-	return s.auth.SetPassword(ctx, password)
+	if err := s.auth.SetPassword(ctx, password); err != nil {
+		return err
+	}
+	err := os.Remove(filepath.Join(s.config.DataDir, "initial-password.txt"))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 func AllowedIP(ip netip.Addr, prefixes []netip.Prefix) bool {
 	for _, p := range prefixes {
@@ -62,7 +69,47 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/files", s.fileDelete)
 	mux.HandleFunc("GET /api/v1/files/download", s.fileDownload)
 	mux.Handle("GET /", lanbayweb.Handler())
-	return s.network(s.log(mux))
+	return s.network(s.host(s.headers(s.log(mux))))
+}
+func (s *Server) host(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.Host)
+		if err != nil {
+			host = r.Host
+		}
+		if host == "" || !allowedHost(host, append(s.config.AllowedHosts, config.DefaultHosts()...)) {
+			http.Error(w, "host no permitido", http.StatusMisdirectedRequest)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+func allowedHost(host string, allowed []string) bool {
+	host = strings.Trim(strings.ToLower(host), "[]")
+	for _, item := range allowed {
+		if host == strings.Trim(strings.ToLower(item), "[]") {
+			return true
+		}
+	}
+	return false
+}
+func (s *Server) headers(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; media-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			origin := r.Header.Get("Origin")
+			if origin != "" && origin != "https://"+r.Host {
+				http.Error(w, "origen no permitido", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 func (s *Server) fileManager(ctx context.Context) (files.Manager, error) {
 	vs, err := s.volumes.List(ctx)
@@ -236,7 +283,7 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request, write bool) boo
 		http.Error(w, "autenticación requerida", http.StatusUnauthorized)
 		return false
 	}
-	ok, change := s.auth.Check(cookie.Value, r.Header.Get("X-CSRF-Token"), write)
+	ok, change := s.auth.Check(r.Context(), cookie.Value, r.Header.Get("X-CSRF-Token"), write)
 	if !ok {
 		http.Error(w, "sesión no válida o CSRF inválido", http.StatusUnauthorized)
 		return false
@@ -251,7 +298,13 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Password string `json:"password"`
 	}
-	if json.NewDecoder(r.Body).Decode(&in) != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "solicitud demasiado grande", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "solicitud inválida", 400)
 		return
 	}
@@ -271,7 +324,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, _ := r.Cookie(auth.CookieName)
-	s.auth.Logout(c.Value)
+	s.auth.Logout(r.Context(), c.Value)
 	http.SetCookie(w, &http.Cookie{Name: auth.CookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -291,7 +344,7 @@ func (s *Server) password(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cookie, _ := r.Cookie(auth.CookieName)
-	s.auth.CompletePasswordChange(cookie.Value)
+	s.auth.CompletePasswordChange(r.Context(), cookie.Value)
 	s.audit(r, "password_change", "ok")
 	w.WriteHeader(http.StatusNoContent)
 }
