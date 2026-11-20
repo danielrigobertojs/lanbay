@@ -12,6 +12,8 @@ func TestLocalReparseDestinationRejectsRemoteBeforeOpen(t *testing.T) {
 	for _, target := range []string{
 		`\\127.0.0.1\c$`,
 		`\??\UNC\127.0.0.1\c$`,
+		`\?\UNC\127.0.0.1\c$`,
+		`\\??\UNC\127.0.0.1\c$`,
 		`\\?\UNC\attacker\share`,
 		`\Device\Mup\attacker\share`,
 		`\??\Volume{01234567-89ab-cdef-0123-456789abcdef}\`,

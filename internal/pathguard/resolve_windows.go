@@ -212,7 +212,7 @@ func reparseTarget(h windows.Handle) (string, bool, error) {
 func localReparseDestination(parent, target string) (string, error) {
 	t := strings.ReplaceAll(target, "/", `\`)
 	lower := strings.ToLower(t)
-	if strings.HasPrefix(lower, `\\??\unc\`) || strings.HasPrefix(lower, `\\?\unc\`) || strings.HasPrefix(lower, `\\`) || strings.HasPrefix(lower, `\device\`) || strings.HasPrefix(lower, `\??\volume{`) || strings.HasPrefix(lower, `\\?\volume{`) {
+	if strings.HasPrefix(lower, `\\??\unc\`) || strings.HasPrefix(lower, `\\?\unc\`) || strings.HasPrefix(lower, `\??\unc\`) || strings.HasPrefix(lower, `\?\unc\`) || strings.HasPrefix(lower, `\\`) || strings.HasPrefix(lower, `\device\`) || strings.HasPrefix(lower, `\??\volume{`) || strings.HasPrefix(lower, `\\?\volume{`) {
 		return "", fmt.Errorf("remote or device reparse destination: %w", ErrOutside)
 	}
 	if strings.HasPrefix(lower, `\??\`) {
