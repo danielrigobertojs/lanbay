@@ -306,23 +306,46 @@ func (m Manager) Zip(ctx context.Context, client string, out io.Writer) error {
 		return err
 	}
 	z := zip.NewWriter(out)
-	defer z.Close()
 	if info.IsDir() {
 		omitted, err := zipTree(ctx, z, r, filepath.Base(r.Path()), 0, newWalkCount())
 		if err != nil {
+			_ = z.Close()
 			return err
 		}
 		if len(omitted) > 0 {
-			z.SetComment("Lanbay: omitted reparse points: " + strings.Join(omitted, ", "))
+			comment := "Lanbay: omitted reparse points: " + strings.Join(omitted, ", ")
+			if len(comment) > 65535 {
+				// ZIP comment max 65535 bytes.
+				truncated := []string{}
+				size := len("Lanbay: omitted reparse points: ")
+				for _, item := range omitted {
+					if size+len(item)+2 > 65500 {
+						truncated = append(truncated, fmt.Sprintf("y %d más", len(omitted)-len(truncated)))
+						break
+					}
+					truncated = append(truncated, item)
+					size += len(item) + 2
+				}
+				comment = "Lanbay: omitted reparse points: " + strings.Join(truncated, ", ")
+			}
+			z.SetComment(comment)
+		}
+		if err := z.Close(); err != nil {
+			return err
 		}
 		return nil
 	}
 	w, err := z.Create(filepath.Base(r.Path()))
 	if err != nil {
+		_ = z.Close()
 		return err
 	}
 	_, err = io.Copy(w, r.File())
-	return err
+	closeErr := z.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
 }
 
 type walkCount struct{ entries int }
@@ -499,7 +522,7 @@ func zipTree(ctx context.Context, z *zip.Writer, dir *pathguard.Resolved, prefix
 			name := filepath.ToSlash(filepath.Join(prefix, entry.Name()))
 			if node.Reparse() {
 				slog.Warn("omitting reparse point from zip", "path", node.Path())
-				omitted = append(omitted, node.Path())
+				omitted = append(omitted, name)
 				_ = node.Close()
 				continue
 			}
@@ -511,7 +534,7 @@ func zipTree(ctx context.Context, z *zip.Writer, dir *pathguard.Resolved, prefix
 				}
 				if node.Reparse() {
 					slog.Warn("omitting reparse point from zip", "path", node.Path())
-					omitted = append(omitted, node.Path())
+					omitted = append(omitted, name)
 					_ = node.Close()
 					continue
 				}
