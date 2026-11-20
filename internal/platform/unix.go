@@ -5,3 +5,6 @@ package platform
 
 // IsElevated is not meaningful on development platforms yet.
 func IsElevated() bool { return false }
+
+// EnforceRedirectionTrust is only available on Windows.
+func EnforceRedirectionTrust() error { return nil }
