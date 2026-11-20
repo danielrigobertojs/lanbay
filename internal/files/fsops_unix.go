@@ -4,6 +4,7 @@
 package files
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 
@@ -27,4 +28,17 @@ func deleteAt(resolved *pathguard.Resolved) error {
 		return ErrRecursiveDelete
 	}
 	return os.Remove(resolved.Path())
+}
+
+func copyFileAt(source, parent *pathguard.Resolved, name string, mode os.FileMode) error {
+	out, err := os.OpenFile(filepath.Join(parent.Path(), name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, source.File())
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }

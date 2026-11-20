@@ -5,6 +5,7 @@ package files
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"runtime"
 	"unsafe"
@@ -90,6 +91,33 @@ func deleteAt(resolved *pathguard.Resolved) error {
 		return fmt.Errorf("delete by handle: %w", err)
 	}
 	return nil
+}
+
+func copyFileAt(source, parent *pathguard.Resolved, name string, _ os.FileMode) error {
+	objectName, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return err
+	}
+	parentHandle, err := fileHandle(parent)
+	if err != nil {
+		return err
+	}
+	oa := &windows.OBJECT_ATTRIBUTES{Length: uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})), RootDirectory: parentHandle, ObjectName: objectName, Attributes: windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE}
+	var destination windows.Handle
+	var status windows.IO_STATUS_BLOCK
+	err = windows.NtCreateFile(&destination, windows.FILE_GENERIC_WRITE, oa, &status, nil, windows.FILE_ATTRIBUTE_NORMAL,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, windows.FILE_CREATE,
+		windows.FILE_NON_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+	if err != nil {
+		return err
+	}
+	out := os.NewFile(uintptr(destination), name)
+	_, copyErr := io.Copy(out, source.File())
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }
 
 func fileHandle(resolved *pathguard.Resolved) (windows.Handle, error) {

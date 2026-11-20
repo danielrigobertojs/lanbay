@@ -20,6 +20,7 @@ import (
 var (
 	ErrRecycleUnavailable = errors.New("recycle_unavailable")
 	ErrRecursiveDelete    = errors.New("recursive_delete_not_supported")
+	ErrDirectoryCopy      = errors.New("directory_copy_not_supported")
 )
 
 type Trash interface {
@@ -184,26 +185,37 @@ func (m Manager) Move(ctx context.Context, source, parent, name string) error {
 	return renameAt(src, dstParent, name)
 }
 func (m Manager) Copy(ctx context.Context, source, parent, name string) error {
-	src, err := m.Guard.Check(source, false)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	src, err := m.Guard.Resolve(source, false)
 	if err != nil {
 		return err
 	}
-	dst, err := m.Guard.CheckNew(parent, name, true)
+	defer src.Close()
+	info, err := src.File().Stat()
 	if err != nil {
 		return err
 	}
-	return copyPath(ctx, src, dst)
+	if info.IsDir() {
+		return ErrDirectoryCopy
+	}
+	if _, err := m.Guard.CheckNew(parent, name, true); err != nil {
+		return err
+	}
+	dstParent, err := m.Guard.ResolveParent(parent)
+	if err != nil {
+		return err
+	}
+	defer dstParent.Close()
+	return copyFileAt(src, dstParent, name, info.Mode())
 }
 func (m Manager) CopyFile(ctx context.Context, source, parent, name string) (string, error) {
 	dst, err := m.Guard.CheckNew(parent, name, true)
 	if err != nil {
 		return "", err
 	}
-	src, err := m.Guard.Check(source, false)
-	if err != nil {
-		return "", err
-	}
-	return dst, copyPath(ctx, src, dst)
+	return dst, m.Copy(ctx, source, parent, name)
 }
 func (m Manager) Delete(ctx context.Context, source string, options DeleteOptions) error {
 	if err := ctx.Err(); err != nil {
@@ -241,42 +253,6 @@ func (m Manager) Open(client string) (*os.File, os.FileInfo, error) {
 		return nil, nil, err
 	}
 	return r.TakeFile(), info, nil
-}
-func copyPath(ctx context.Context, src, dst string) error {
-	info, err := os.Stat(src)
-	if err != nil {
-		return err
-	}
-	if info.IsDir() {
-		if err = os.Mkdir(dst, info.Mode()); err != nil {
-			return err
-		}
-		items, err := os.ReadDir(src)
-		if err != nil {
-			return err
-		}
-		for _, item := range items {
-			if err := copyPath(ctx, filepath.Join(src, item.Name()), filepath.Join(dst, item.Name())); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode())
-	if err != nil {
-		return err
-	}
-	_, err = io.Copy(out, in)
-	closeErr := out.Close()
-	if err != nil {
-		return err
-	}
-	return closeErr
 }
 func (m Manager) Zip(ctx context.Context, client string, out io.Writer) error {
 	p, err := m.Guard.Check(client, false)
