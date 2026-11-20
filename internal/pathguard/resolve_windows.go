@@ -16,12 +16,25 @@ import (
 
 const maxReparseHops = 8
 
+// Access rights not exposed by golang.org/x/sys/windows.
+const (
+	fileAddFile         = 0x00000002
+	fileAddSubdirectory = 0x00000004
+	fileDeleteChild     = 0x00000040
+)
+
 // resolveOpen retains the final handle while walking each child relative to an
 // already-open parent. OBJ_DONT_REPARSE prevents a directory swapped after its
 // inspection from being followed by the next open.
-func resolveOpen(path string, write bool) (*Resolved, error) {
+func resolveOpen(path string, write, container bool) (*Resolved, error) {
 	finalAccess := uint32(windows.FILE_GENERIC_READ)
-	if write {
+	if container {
+		// A directory used as the parent of a mutation needs the rights to
+		// list, create files/subdirectories and (for deletes within it) delete
+		// children. It must NOT carry DELETE on the directory itself, which
+		// would allow removing the container.
+		finalAccess = windows.FILE_LIST_DIRECTORY | fileAddFile | fileAddSubdirectory | windows.FILE_TRAVERSE | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE | fileDeleteChild
+	} else if write {
 		// Mutations are performed with a handle-specific operation below. Do
 		// not ask for write-data: DELETE is sufficient for rename/delete, and
 		// permits operations on a readonly file.
