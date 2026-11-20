@@ -36,3 +36,27 @@ func TestMkdirAndCopyByHandle(t *testing.T) {
 		t.Fatalf("copied file: %v %s", err, data)
 	}
 }
+
+func TestMoveBetweenDirectoriesByHandle(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "a"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "b"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(root, "a", "file.txt")
+	if err := os.WriteFile(src, []byte("move"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	m := Manager{Guard: pathguard.Guard{Roots: []string{root}}}
+	if err := m.Move(context.Background(), src, filepath.Join(root, "b"), "file.txt"); err != nil {
+		t.Fatalf("move: %v", err)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Fatalf("source remains after move: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "b", "file.txt")); err != nil || string(data) != "move" {
+		t.Fatalf("moved file: %v %s", err, data)
+	}
+}

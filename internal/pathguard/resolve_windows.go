@@ -20,7 +20,6 @@ const maxReparseHops = 8
 const (
 	fileAddFile         = 0x00000002
 	fileAddSubdirectory = 0x00000004
-	fileDeleteChild     = 0x00000040
 )
 
 // resolveOpen retains the final handle while walking each child relative to an
@@ -33,7 +32,7 @@ func resolveOpen(path string, write, container bool) (*Resolved, error) {
 		// list, create files/subdirectories and (for deletes within it) delete
 		// children. It must NOT carry DELETE on the directory itself, which
 		// would allow removing the container.
-		finalAccess = windows.FILE_LIST_DIRECTORY | fileAddFile | fileAddSubdirectory | windows.FILE_TRAVERSE | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE | fileDeleteChild
+		finalAccess = windows.FILE_LIST_DIRECTORY | fileAddFile | fileAddSubdirectory | windows.FILE_TRAVERSE | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE
 	} else if write {
 		// Mutations are performed with a handle-specific operation below. Do
 		// not ask for write-data: DELETE is sufficient for rename/delete, and

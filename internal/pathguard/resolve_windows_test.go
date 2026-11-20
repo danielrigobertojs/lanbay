@@ -130,13 +130,19 @@ func TestResolveParentRaceCannotCreateInProtectedJunctionTarget(t *testing.T) {
 			_ = os.Mkdir(entry, 0700)
 		}
 	}()
+	created := 0
 	for i := 0; i < 100; i++ {
 		r, err := g.ResolveParent(entry)
 		if err != nil {
 			continue // Junction observed or attacker changed it mid-resolution.
 		}
-		_ = createRelativeFile(r, "created-"+strconv.Itoa(i))
+		if err := createRelativeFile(r, "created-"+strconv.Itoa(i)); err == nil {
+			created++
+		}
 		_ = r.Close()
+	}
+	if created == 0 {
+		t.Fatal("race test never created a file; it did not exercise the protected path")
 	}
 	close(stop)
 	done.Wait()
