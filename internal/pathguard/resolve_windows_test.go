@@ -8,8 +8,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestLocalReparseDestinationRejectsRemoteBeforeOpen(t *testing.T) {
@@ -74,4 +80,73 @@ func makeJunction(t *testing.T, link, target string) {
 	if err != nil {
 		t.Fatalf("create junction: %v: %s", err, strings.TrimSpace(string(output)))
 	}
+}
+
+func TestResolveParentRaceCannotCreateInProtectedJunctionTarget(t *testing.T) {
+	root := t.TempDir()
+	entry := filepath.Join(root, "entry")
+	canary := filepath.Join(root, "canary")
+	if err := os.Mkdir(entry, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(canary, 0700); err != nil {
+		t.Fatal(err)
+	}
+	g := Guard{Roots: []string{root}, Protected: []string{canary}}
+	stop := make(chan struct{})
+	var done sync.WaitGroup
+	done.Add(1)
+	go func() {
+		defer done.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = os.Remove(entry)
+			makeJunctionBestEffort(entry, canary)
+			_ = os.Remove(entry)
+			_ = os.Mkdir(entry, 0700)
+		}
+	}()
+	for i := 0; i < 100; i++ {
+		r, err := g.ResolveParent(entry)
+		if err != nil {
+			continue // Junction observed or attacker changed it mid-resolution.
+		}
+		_ = createRelativeFile(r, "created-"+strconv.Itoa(i))
+		_ = r.Close()
+	}
+	close(stop)
+	done.Wait()
+	entries, err := os.ReadDir(canary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("race created entries in protected canary: %#v", entries)
+	}
+}
+
+func makeJunctionBestEffort(link, target string) {
+	_ = exec.Command("cmd", "/c", "mklink", "/J", link, target).Run()
+}
+
+func createRelativeFile(parent *Resolved, name string) error {
+	objectName, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return err
+	}
+	file := parent.File()
+	h := windows.Handle(file.Fd())
+	runtime.KeepAlive(file)
+	oa := &windows.OBJECT_ATTRIBUTES{Length: uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})), RootDirectory: h, ObjectName: objectName, Attributes: windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE}
+	var created windows.Handle
+	var status windows.IO_STATUS_BLOCK
+	err = windows.NtCreateFile(&created, windows.FILE_GENERIC_WRITE, oa, &status, nil, windows.FILE_ATTRIBUTE_NORMAL, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, windows.FILE_CREATE, windows.FILE_NON_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+	if err == nil {
+		err = windows.CloseHandle(created)
+	}
+	return err
 }
