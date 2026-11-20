@@ -17,7 +17,12 @@ import (
 	"github.com/danielrigobertojs/lanbay/internal/pathguard"
 )
 
-var ErrRecycleUnavailable = errors.New("recycle_unavailable")
+var (
+	ErrRecycleUnavailable = errors.New("recycle_unavailable")
+	ErrRecursiveDelete    = errors.New("recursive_delete_not_supported")
+	ErrDirectoryCopy      = errors.New("directory_copy_not_supported")
+	ErrDirectoryZip       = errors.New("directory_zip_not_supported")
+)
 
 type Trash interface {
 	Delete(context.Context, string) error
@@ -55,11 +60,13 @@ type Manager struct {
 type Service = Manager
 
 func (m Manager) List(ctx context.Context, client string, opt ListOptions) (Listing, error) {
-	p, err := m.Guard.Check(client, false)
+	r, err := m.Guard.Resolve(client, false)
 	if err != nil {
 		return Listing{}, err
 	}
-	dirs, err := os.ReadDir(p)
+	defer r.Close()
+	p := r.Path()
+	dirs, err := r.File().ReadDir(-1)
 	if err != nil {
 		return Listing{}, fmt.Errorf("read directory: %w", err)
 	}
@@ -124,7 +131,12 @@ func (m Manager) Mkdir(ctx context.Context, parent, name string) (string, error)
 	if err != nil {
 		return "", err
 	}
-	return p, os.Mkdir(p, 0750)
+	r, err := m.Guard.ResolveParent(parent)
+	if err != nil {
+		return "", err
+	}
+	defer r.Close()
+	return p, mkdirAt(r, name, 0750)
 }
 func (m Manager) Rename(ctx context.Context, source string, args ...string) (string, error) {
 	if len(args) < 1 || len(args) > 2 {
@@ -137,7 +149,7 @@ func (m Manager) Rename(ctx context.Context, source string, args ...string) (str
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	src, err := m.Guard.Check(source, true)
+	src, err := m.Guard.Resolve(source, true)
 	if err != nil {
 		return "", err
 	}
@@ -145,72 +157,94 @@ func (m Manager) Rename(ctx context.Context, source string, args ...string) (str
 	if err != nil {
 		return "", err
 	}
-	return dst, os.Rename(src, dst)
+	dstParent, err := m.Guard.ResolveParent(parent)
+	if err != nil {
+		return "", err
+	}
+	defer src.Close()
+	defer dstParent.Close()
+	return dst, renameAt(src, dstParent, name)
 }
 func (m Manager) Move(ctx context.Context, source, parent, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	src, err := m.Guard.Check(source, true)
+	src, err := m.Guard.Resolve(source, true)
 	if err != nil {
 		return err
 	}
-	dst, err := m.Guard.CheckNew(parent, name, true)
+	_, err = m.Guard.CheckNew(parent, name, true)
 	if err != nil {
 		return err
 	}
-	return os.Rename(src, dst)
+	dstParent, err := m.Guard.ResolveParent(parent)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	defer dstParent.Close()
+	return renameAt(src, dstParent, name)
 }
 func (m Manager) Copy(ctx context.Context, source, parent, name string) error {
-	src, err := m.Guard.Check(source, false)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	src, err := m.Guard.Resolve(source, false)
 	if err != nil {
 		return err
 	}
-	dst, err := m.Guard.CheckNew(parent, name, true)
+	defer src.Close()
+	info, err := src.File().Stat()
 	if err != nil {
 		return err
 	}
-	return copyPath(ctx, src, dst)
+	if info.IsDir() {
+		return ErrDirectoryCopy
+	}
+	if _, err := m.Guard.CheckNew(parent, name, true); err != nil {
+		return err
+	}
+	dstParent, err := m.Guard.ResolveParent(parent)
+	if err != nil {
+		return err
+	}
+	defer dstParent.Close()
+	return copyFileAt(src, dstParent, name, info.Mode())
 }
 func (m Manager) CopyFile(ctx context.Context, source, parent, name string) (string, error) {
 	dst, err := m.Guard.CheckNew(parent, name, true)
 	if err != nil {
 		return "", err
 	}
-	src, err := m.Guard.Check(source, false)
-	if err != nil {
-		return "", err
-	}
-	return dst, copyPath(ctx, src, dst)
+	return dst, m.Copy(ctx, source, parent, name)
 }
 func (m Manager) Delete(ctx context.Context, source string, options DeleteOptions) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	p, err := m.Guard.Check(source, true)
+	r, err := m.Guard.Resolve(source, true)
 	if err != nil {
 		return err
 	}
+	defer r.Close()
 	if !options.Permanent {
 		if !options.Recycle || m.Trash == nil {
 			return ErrRecycleUnavailable
 		}
-		return m.Trash.Delete(ctx, p)
+		return m.Trash.Delete(ctx, r.Path())
 	}
-	return os.RemoveAll(p)
+	return deleteAt(r)
 }
 
 // Open resolves a file for a download. Directories are rejected so callers
 // must use Zip, keeping content-disposition policy at the HTTP boundary.
 func (m Manager) Open(client string) (*os.File, os.FileInfo, error) {
-	p, err := m.Guard.Check(client, false)
+	r, err := m.Guard.Resolve(client, false)
 	if err != nil {
 		return nil, nil, err
 	}
-	f, err := os.Open(p)
-	if err != nil {
-		return nil, nil, err
-	}
+	defer r.Close()
+	f := r.File()
 	info, err := f.Stat()
 	if err != nil || info.IsDir() {
 		_ = f.Close()
@@ -219,72 +253,30 @@ func (m Manager) Open(client string) (*os.File, os.FileInfo, error) {
 		}
 		return nil, nil, err
 	}
-	return f, info, nil
+	return r.TakeFile(), info, nil
 }
-func copyPath(ctx context.Context, src, dst string) error {
-	info, err := os.Stat(src)
+func (m Manager) Zip(ctx context.Context, client string, out io.Writer) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r, err := m.Guard.Resolve(client, false)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	info, err := r.File().Stat()
 	if err != nil {
 		return err
 	}
 	if info.IsDir() {
-		if err = os.Mkdir(dst, info.Mode()); err != nil {
-			return err
-		}
-		items, err := os.ReadDir(src)
-		if err != nil {
-			return err
-		}
-		for _, item := range items {
-			if err := copyPath(ctx, filepath.Join(src, item.Name()), filepath.Join(dst, item.Name())); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode())
-	if err != nil {
-		return err
-	}
-	_, err = io.Copy(out, in)
-	closeErr := out.Close()
-	if err != nil {
-		return err
-	}
-	return closeErr
-}
-func (m Manager) Zip(ctx context.Context, client string, out io.Writer) error {
-	p, err := m.Guard.Check(client, false)
-	if err != nil {
-		return err
+		return ErrDirectoryZip
 	}
 	z := zip.NewWriter(out)
 	defer z.Close()
-	return filepath.Walk(p, func(name string, info os.FileInfo, e error) error {
-		if e != nil {
-			return e
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
-		rel, _ := filepath.Rel(filepath.Dir(p), name)
-		w, e := z.Create(rel)
-		if e != nil {
-			return e
-		}
-		f, e := os.Open(name)
-		if e != nil {
-			return e
-		}
-		defer f.Close()
-		_, e = io.Copy(w, f)
-		return e
-	})
+	w, err := z.Create(filepath.Base(r.Path()))
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(w, r.File())
+	return err
 }

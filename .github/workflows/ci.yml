@@ -29,6 +29,7 @@ jobs:
       - run: CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o dist/lanbay-darwin ./cmd/lanbay
       - run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/lanbay-linux ./cmd/lanbay
       - run: bash scripts/check-spdx.sh
+      - run: bash scripts/check-pathguard-boundary.sh
       - run: bash scripts/gen-third-party.sh && git diff --exit-code -- THIRD_PARTY_LICENSES.md
       - name: Require DCO sign-off
         shell: bash

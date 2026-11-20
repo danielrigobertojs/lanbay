@@ -5,6 +5,7 @@ package pathguard
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -19,15 +20,82 @@ var (
 
 type Guard struct{ Roots, Protected []string }
 
-func (g Guard) Check(client string, write bool) (string, error) {
+// Resolved is an authorized, opened filesystem object. Its fields are private
+// so only pathguard can construct it from a client-supplied path.
+type Resolved struct {
+	path string
+	file *os.File
+}
+
+func (r *Resolved) Close() error {
+	if r == nil || r.file == nil {
+		return nil
+	}
+	err := r.file.Close()
+	r.file = nil
+	return err
+}
+
+// File returns the already-open validated handle. It is for the internal
+// filesystem boundary; callers must not close it separately.
+func (r *Resolved) File() *os.File { return r.file }
+
+// TakeFile transfers ownership of the validated handle to the caller. It is
+// for downloads and other operations that must outlive Resolved itself.
+func (r *Resolved) TakeFile() *os.File {
+	if r == nil {
+		return nil
+	}
+	f := r.file
+	r.file = nil
+	return f
+}
+
+// Path is canonical and intended only for display/logging, never for reopening
+// a mutating client operation.
+func (r *Resolved) Path() string { return r.path }
+
+// Resolve validates client and opens its final object before returning it.
+func (g Guard) Resolve(client string, write bool) (*Resolved, error) {
 	if err := lexical(client); err != nil {
+		return nil, err
+	}
+	r, err := resolveOpen(client, write)
+	if err != nil {
+		return nil, fmt.Errorf("resolve existing path: %w", err)
+	}
+	if _, err := g.authorize(r.path, write); err != nil {
+		_ = r.Close()
+		return nil, err
+	}
+	return r, nil
+}
+
+// ResolveParent opens an existing directory for a child mutation. Unlike
+// Resolve(..., true), an allowed volume root is valid here because the root
+// itself is not being renamed or deleted.
+func (g Guard) ResolveParent(client string) (*Resolved, error) {
+	if err := lexical(client); err != nil {
+		return nil, err
+	}
+	r, err := resolveOpen(client, true)
+	if err != nil {
+		return nil, fmt.Errorf("resolve parent: %w", err)
+	}
+	if _, err := g.authorizeParent(r.path); err != nil {
+		_ = r.Close()
+		return nil, err
+	}
+	return r, nil
+}
+
+func (g Guard) Check(client string, write bool) (string, error) {
+	r, err := g.Resolve(client, write)
+	if err != nil {
 		return "", err
 	}
-	p, err := resolve(client)
-	if err != nil {
-		return "", fmt.Errorf("resolve existing path: %w", err)
-	}
-	return g.authorize(p, write)
+	defer r.Close()
+	return r.path, nil
 }
 
 // CheckNew validates an untrusted leaf below an existing, authorized parent.
@@ -66,6 +134,10 @@ func (g Guard) CheckTransfer(source, destination string) (string, string, error)
 }
 
 func (g Guard) authorize(path string, write bool) (string, error) {
+	return g.authorizeWithRoot(path, write, false)
+}
+
+func (g Guard) authorizeParent(path string) (string, error) {
 	p := filepath.Clean(path)
 	root := ""
 	for _, candidate := range g.Roots {
@@ -81,7 +153,35 @@ func (g Guard) authorize(path string, write bool) (string, error) {
 	if root == "" {
 		return "", ErrOutside
 	}
-	if write && samePath(p, root) {
+	for _, protected := range g.Protected {
+		canonical, err := resolve(protected)
+		if err != nil {
+			return "", fmt.Errorf("resolve protected zone: %w", err)
+		}
+		if within(p, canonical) {
+			return "", ErrProtected
+		}
+	}
+	return p, nil
+}
+
+func (g Guard) authorizeWithRoot(path string, write, allowRoot bool) (string, error) {
+	p := filepath.Clean(path)
+	root := ""
+	for _, candidate := range g.Roots {
+		canonical, err := resolve(candidate)
+		if err != nil {
+			return "", fmt.Errorf("resolve allowed root: %w", err)
+		}
+		if within(p, canonical) {
+			root = canonical
+			break
+		}
+	}
+	if root == "" {
+		return "", ErrOutside
+	}
+	if write && !allowRoot && samePath(p, root) {
 		return "", ErrRoot
 	}
 	if write {
