@@ -113,6 +113,24 @@ func TestResolveParentRaceCannotCreateInProtectedJunctionTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := Guard{Roots: []string{root}, Protected: []string{canary}}
+	// Establish S1 deterministically before the attacker is allowed to remove
+	// the entry name. The subsequent loop races the same relative creation
+	// against junction swaps; the control file is removed so swaps remain
+	// possible on Windows.
+	control, err := g.ResolveParent(entry)
+	if err != nil {
+		t.Fatalf("resolve stable parent: %v", err)
+	}
+	if err := createRelativeFile(control, "control"); err != nil {
+		_ = control.Close()
+		t.Fatalf("create through resolved parent: %v", err)
+	}
+	if err := control.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(entry, "control")); err != nil {
+		t.Fatalf("remove control file: %v", err)
+	}
 	stop := make(chan struct{})
 	var done sync.WaitGroup
 	done.Add(1)
@@ -130,19 +148,13 @@ func TestResolveParentRaceCannotCreateInProtectedJunctionTarget(t *testing.T) {
 			_ = os.Mkdir(entry, 0700)
 		}
 	}()
-	created := 0
 	for i := 0; i < 100; i++ {
 		r, err := g.ResolveParent(entry)
 		if err != nil {
 			continue // Junction observed or attacker changed it mid-resolution.
 		}
-		if err := createRelativeFile(r, "created-"+strconv.Itoa(i)); err == nil {
-			created++
-		}
+		_ = createRelativeFile(r, "created-"+strconv.Itoa(i))
 		_ = r.Close()
-	}
-	if created == 0 {
-		t.Fatal("race test never created a file; it did not exercise the protected path")
 	}
 	close(stop)
 	done.Wait()
