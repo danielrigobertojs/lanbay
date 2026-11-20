@@ -78,7 +78,9 @@ func (g Guard) ResolveParent(client string) (*Resolved, error) {
 	if err := lexical(client); err != nil {
 		return nil, err
 	}
-	r, err := resolveOpen(client, true)
+	// Parent handles are only used as RootDirectory handles for relative
+	// operations. They require traversal/metadata access, not DELETE access.
+	r, err := resolveOpen(client, false)
 	if err != nil {
 		return nil, fmt.Errorf("resolve parent: %w", err)
 	}

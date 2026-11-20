@@ -20,9 +20,12 @@ const maxReparseHops = 8
 // already-open parent. OBJ_DONT_REPARSE prevents a directory swapped after its
 // inspection from being followed by the next open.
 func resolveOpen(path string, write bool) (*Resolved, error) {
-	access := uint32(windows.FILE_GENERIC_READ)
+	finalAccess := uint32(windows.FILE_GENERIC_READ)
 	if write {
-		access |= windows.FILE_GENERIC_WRITE | windows.DELETE
+		// Mutations are performed with a handle-specific operation below. Do
+		// not ask for write-data: DELETE is sufficient for rename/delete, and
+		// permits operations on a readonly file.
+		finalAccess = windows.DELETE | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE
 	}
 	current := filepath.Clean(path)
 	for hops := 0; ; {
@@ -46,6 +49,10 @@ func resolveOpen(path string, write bool) (*Resolved, error) {
 		}
 		restarted := false
 		for i, part := range parts {
+			access := uint32(windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE)
+			if i == len(parts)-1 {
+				access = finalAccess
+			}
 			child, err := openRelative(parent, part, access)
 			if err != nil {
 				_ = windows.CloseHandle(parent)
@@ -191,6 +198,11 @@ func reparseTarget(h windows.Handle) (string, bool, error) {
 	}
 	tag := binary.LittleEndian.Uint32(buf[:4])
 	if tag != windows.IO_REPARSE_TAG_MOUNT_POINT && tag != windows.IO_REPARSE_TAG_SYMLINK {
+		// Unknown name-surrogate tags redirect name resolution. We cannot
+		// inspect their target safely, so fail closed rather than traverse it.
+		if tag&0x20000000 != 0 {
+			return "", false, fmt.Errorf("unsupported name-surrogate reparse point: %w", ErrOutside)
+		}
 		return "", false, nil
 	}
 	off, length, start := int(binary.LittleEndian.Uint16(buf[8:10])), int(binary.LittleEndian.Uint16(buf[10:12])), 16
