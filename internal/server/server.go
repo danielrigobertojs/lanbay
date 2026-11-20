@@ -7,11 +7,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/danielrigobertojs/lanbay/internal/auth"
 	"github.com/danielrigobertojs/lanbay/internal/config"
 	"github.com/danielrigobertojs/lanbay/internal/files"
+	"github.com/danielrigobertojs/lanbay/internal/jobs"
 	"github.com/danielrigobertojs/lanbay/internal/pathguard"
 	"github.com/danielrigobertojs/lanbay/internal/platform"
+	"github.com/danielrigobertojs/lanbay/internal/uploads"
 	"github.com/danielrigobertojs/lanbay/internal/volumes"
 	lanbayweb "github.com/danielrigobertojs/lanbay/internal/web"
 	"log/slog"
@@ -34,10 +37,19 @@ type Server struct {
 	db      *sql.DB
 	version string
 	auditMu sync.Mutex
+	jobs    *jobs.Manager
+	uploads *uploads.Manager
 }
 
 func New(c config.Config, db *sql.DB, provider volumes.Provider, version string) *Server {
-	return &Server{config: c, auth: auth.New(db, c.SessionIdle), volumes: provider, db: db, version: version}
+	s := &Server{config: c, auth: auth.New(db, c.SessionIdle), volumes: provider, db: db, version: version}
+	if db != nil {
+		s.jobs, _ = jobs.New(db)
+		if s.jobs != nil {
+			s.uploads = uploads.New(db, s.jobs)
+		}
+	}
+	return s
 }
 func (s *Server) Initialize(ctx context.Context) (string, error) { return s.auth.EnsurePassword(ctx) }
 func (s *Server) SetPassword(ctx context.Context, password string) error {
@@ -72,6 +84,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/files/copy", s.fileCopy)
 	mux.HandleFunc("DELETE /api/v1/files", s.fileDelete)
 	mux.HandleFunc("GET /api/v1/files/download", s.fileDownload)
+	mux.HandleFunc("POST /api/v1/uploads", s.uploadCreate)
+	mux.HandleFunc("PATCH /api/v1/uploads/{id}", s.uploadChunk)
+	mux.HandleFunc("DELETE /api/v1/uploads/{id}", s.uploadCancel)
+	mux.HandleFunc("GET /api/v1/jobs", s.jobList)
+	mux.HandleFunc("POST /api/v1/jobs/{id}/cancel", s.jobCancel)
+	mux.HandleFunc("GET /api/v1/events", s.events)
 	mux.Handle("GET /", lanbayweb.Handler())
 	return s.network(s.host(s.headers(s.log(mux))))
 }
@@ -199,18 +217,30 @@ func (s *Server) fileTransfer(w http.ResponseWriter, r *http.Request, move bool)
 		return
 	}
 	m, e := s.fileManager(r.Context())
-	if e == nil {
-		if move {
-			e = m.Move(r.Context(), in.Source, in.Parent, in.Name)
-		} else {
-			e = m.Copy(r.Context(), in.Source, in.Parent, in.Name)
-		}
+	if e == nil && s.jobs == nil {
+		e = errors.New("jobs no disponibles")
 	}
 	if e != nil {
 		fileError(w, e)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	kind := "copy"
+	if move {
+		kind = "move"
+	}
+	j, e := s.jobs.Create(r.Context(), kind, 0)
+	if e != nil {
+		http.Error(w, "no se pudo crear el job", 500)
+		return
+	}
+	s.jobs.Start(j, func(ctx context.Context) error {
+		if move {
+			return m.Move(ctx, in.Source, in.Parent, in.Name)
+		}
+		return m.Copy(ctx, in.Source, in.Parent, in.Name)
+	})
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(j)
 }
 func (s *Server) fileDelete(w http.ResponseWriter, r *http.Request) {
 	if !s.session(w, r, true) {
@@ -287,6 +317,142 @@ func fileError(w http.ResponseWriter, e error) {
 		return
 	}
 	http.Error(w, e.Error(), code)
+}
+func (s *Server) uploadCreate(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, true) {
+		return
+	}
+	if s.uploads == nil {
+		http.Error(w, "subidas no disponibles", http.StatusServiceUnavailable)
+		return
+	}
+	var in struct {
+		Parent string `json:"parent"`
+		Name   string `json:"name"`
+		Size   int64  `json:"size_bytes"`
+		Chunk  int64  `json:"chunk_size"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil {
+		http.Error(w, "solicitud inválida", 400)
+		return
+	}
+	m, err := s.fileManager(r.Context())
+	if err == nil {
+		session, createErr := s.uploads.Create(r.Context(), m.Guard, in.Parent, in.Name, in.Size, in.Chunk)
+		err = createErr
+		if err == nil {
+			w.Header().Set("Location", "/api/v1/uploads/"+session.ID)
+			w.Header().Set("Upload-Offset", "0")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(session)
+			return
+		}
+	}
+	fileError(w, err)
+}
+func (s *Server) uploadChunk(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, true) {
+		return
+	}
+	if s.uploads == nil {
+		http.Error(w, "subidas no disponibles", http.StatusServiceUnavailable)
+		return
+	}
+	offset, err := strconv.ParseInt(r.Header.Get("Upload-Offset"), 10, 64)
+	if err != nil || offset < 0 || r.ContentLength <= 0 || r.ContentLength > uploads.MaxChunk {
+		http.Error(w, "chunk inválido", 400)
+		return
+	}
+	session, err := s.uploads.Write(r.Context(), r.PathValue("id"), offset, r.ContentLength, http.MaxBytesReader(w, r.Body, uploads.MaxChunk))
+	if err != nil {
+		fileError(w, err)
+		return
+	}
+	w.Header().Set("Upload-Offset", strconv.FormatInt(session.Offset, 10))
+	w.Header().Set("Upload-State", session.State)
+	w.WriteHeader(http.StatusNoContent)
+}
+func (s *Server) uploadCancel(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, true) {
+		return
+	}
+	if s.uploads == nil {
+		http.Error(w, "subidas no disponibles", http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.uploads.Cancel(r.Context(), r.PathValue("id")); err != nil {
+		fileError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+func (s *Server) jobList(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, false) {
+		return
+	}
+	if s.jobs == nil {
+		http.Error(w, "jobs no disponibles", http.StatusServiceUnavailable)
+		return
+	}
+	items, err := s.jobs.List(r.Context())
+	if err != nil {
+		http.Error(w, "no se pudieron leer los jobs", 500)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"jobs": items})
+}
+func (s *Server) jobCancel(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, true) {
+		return
+	}
+	if s.jobs == nil {
+		http.Error(w, "jobs no disponibles", http.StatusServiceUnavailable)
+		return
+	}
+	id := r.PathValue("id")
+	var uploadID string
+	err := s.db.QueryRowContext(r.Context(), "SELECT id FROM uploads WHERE job_id=? AND state='active'", id).Scan(&uploadID)
+	if err == nil {
+		err = s.uploads.Cancel(r.Context(), uploadID)
+	} else if errors.Is(err, sql.ErrNoRows) {
+		err = s.jobs.Cancel(r.Context(), id)
+	}
+	if err != nil {
+		fileError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+func (s *Server) events(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, false) {
+		return
+	}
+	if s.jobs == nil {
+		http.Error(w, "jobs no disponibles", http.StatusServiceUnavailable)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming no disponible", 500)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	events, stop := s.jobs.Subscribe()
+	defer stop()
+	fmt.Fprint(w, ": connected\n\n")
+	flusher.Flush()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event := <-events:
+			data, _ := json.Marshal(event)
+			fmt.Fprintf(w, "event: job\ndata: %s\n\n", data)
+			flusher.Flush()
+		}
+	}
 }
 func (s *Server) network(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

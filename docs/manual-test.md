@@ -21,3 +21,13 @@ Antes del release, en la Ally con la microSD FAT32 montada como `D:`:
 3. Intentar borrar, copiar y comprimir una carpeta. Confirmar que la UI muestra "Aún no disponible para carpetas en este volumen (JCB-473)" y que la carpeta no cambia.
 
 Esta comprobación cubre los fallbacks `FileDispositionInfo`/`FileRenameInfo` para FAT32 y requiere Windows real; no se declara verificada desde macOS.
+
+## M3: subida reanudable y suspensión
+
+Pendiente de verificación en la Ally (E1); no se declara verificado desde macOS.
+
+1. Desde un equipo de la LAN, subir una carpeta de 20 GB a la microSD usando el panel.
+2. Durante un archivo, suspender la Ally y volver a despertarla. Confirmar que el navegador reconecta a `/api/v1/events` y que la carga puede continuar desde el offset mostrado.
+3. Cancelar otra carga a mitad de archivo. Confirmar que no existe un archivo con el nombre final ni queda contenido parcial visible en el destino.
+4. Medir el throughput visible en la red local; el objetivo es más de 80 MB/s si la red lo permite.
+5. No probar subidas de carpetas ni copias/movimientos de carpetas hasta que JCB-473 haya aportado el walker seguro por handles.
