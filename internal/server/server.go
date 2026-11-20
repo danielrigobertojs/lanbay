@@ -312,10 +312,6 @@ func fileError(w http.ResponseWriter, e error) {
 	if errors.Is(e, pathguard.ErrProtected) || errors.Is(e, pathguard.ErrRoot) {
 		code = http.StatusForbidden
 	}
-	if errors.Is(e, files.ErrRecursiveDelete) || errors.Is(e, files.ErrDirectoryCopy) || errors.Is(e, files.ErrDirectoryZip) {
-		http.Error(w, "Aún no disponible para carpetas en este volumen (JCB-473)", code)
-		return
-	}
 	http.Error(w, e.Error(), code)
 }
 func (s *Server) uploadCreate(w http.ResponseWriter, r *http.Request) {

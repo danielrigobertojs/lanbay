@@ -39,6 +39,18 @@ func resolveOpen(path string, write, container bool) (*Resolved, error) {
 		// permits operations on a readonly file.
 		finalAccess = windows.DELETE | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE
 	}
+	return resolveOpenAccess(path, finalAccess)
+}
+
+func resolveWalkOpen(path string, write bool) (*Resolved, error) {
+	access := uint32(windows.FILE_LIST_DIRECTORY | windows.FILE_TRAVERSE | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE)
+	if write {
+		access |= windows.DELETE
+	}
+	return resolveOpenAccess(path, access)
+}
+
+func resolveOpenAccess(path string, finalAccess uint32) (*Resolved, error) {
 	current := filepath.Clean(path)
 	for hops := 0; ; {
 		volume := filepath.VolumeName(current)
@@ -128,6 +140,26 @@ func openRelative(parent windows.Handle, name string, access uint32) (windows.Ha
 		return 0, err
 	}
 	return handle, nil
+}
+
+func openChild(parent *Resolved, name string, write, container bool) (*Resolved, error) {
+	access := uint32(windows.FILE_GENERIC_READ)
+	if container {
+		access = windows.FILE_LIST_DIRECTORY | fileAddFile | fileAddSubdirectory | windows.FILE_TRAVERSE | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE
+	}
+	if write {
+		access |= windows.DELETE | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE
+	}
+	h, err := openRelative(windows.Handle(parent.File().Fd()), name, access)
+	if err != nil {
+		return nil, err
+	}
+	_, linked, err := reparseTarget(h)
+	if err != nil {
+		_ = windows.CloseHandle(h)
+		return nil, err
+	}
+	return &Resolved{path: filepath.Join(parent.Path(), name), file: os.NewFile(uintptr(h), name), reparse: linked}, nil
 }
 
 // resolve walks every component with OPEN_REPARSE_POINT. A junction is thus
