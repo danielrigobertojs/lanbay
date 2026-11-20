@@ -20,7 +20,15 @@ func resolveOpen(path string, _ bool, _ bool) (*Resolved, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Resolved{path: p, file: f}, nil
+	var parent *os.File
+	own := false
+	if dir := filepath.Dir(p); dir != "" && dir != p {
+		if pf, err := os.Open(dir); err == nil {
+			parent = pf
+			own = true
+		}
+	}
+	return &Resolved{path: p, file: f, parent: parent, ownParent: own}, nil
 }
 
 func openChild(parent *Resolved, name string, _ bool, container bool) (*Resolved, error) {
@@ -31,11 +39,11 @@ func openChild(parent *Resolved, name string, _ bool, container bool) (*Resolved
 	fd, err := unix.Openat(int(parent.File().Fd()), name, flags, 0)
 	if err != nil {
 		if errors.Is(err, unix.ELOOP) {
-			return &Resolved{path: filepath.Join(parent.Path(), name), reparse: true}, nil
+			return &Resolved{path: filepath.Join(parent.Path(), name), reparse: true, parent: parent.File(), ownParent: false}, nil
 		}
 		return nil, err
 	}
-	return &Resolved{path: filepath.Join(parent.Path(), name), file: os.NewFile(uintptr(fd), name)}, nil
+	return &Resolved{path: filepath.Join(parent.Path(), name), file: os.NewFile(uintptr(fd), name), parent: parent.File(), ownParent: false}, nil
 }
 
 func resolveWalkOpen(path string, write bool) (*Resolved, error) {

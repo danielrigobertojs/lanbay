@@ -23,23 +23,35 @@ type Guard struct{ Roots, Protected []string }
 // Resolved is an authorized, opened filesystem object. Its fields are private
 // so only pathguard can construct it from a client-supplied path.
 type Resolved struct {
-	path    string
-	file    *os.File
-	reparse bool
+	path      string
+	file      *os.File
+	reparse   bool
+	parent    *os.File // Unix: parent directory handle for relative deletion
+	ownParent bool     // true when this Resolved owns parent and must close it
 }
 
 func (r *Resolved) Close() error {
-	if r == nil || r.file == nil {
-		return nil
+	var err error
+	if r != nil && r.file != nil {
+		err = r.file.Close()
+		r.file = nil
 	}
-	err := r.file.Close()
-	r.file = nil
+	if r != nil && r.ownParent && r.parent != nil {
+		if cerr := r.parent.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+		r.parent = nil
+	}
 	return err
 }
 
 // File returns the already-open validated handle. It is for the internal
 // filesystem boundary; callers must not close it separately.
 func (r *Resolved) File() *os.File { return r.file }
+
+// ParentFile returns the already-open parent directory handle used for
+// relative deletion on Unix. It is nil on Windows or for volume roots.
+func (r *Resolved) ParentFile() *os.File { return r.parent }
 
 // TakeFile transfers ownership of the validated handle to the caller. It is
 // for downloads and other operations that must outlive Resolved itself.

@@ -159,7 +159,7 @@ func openChild(parent *Resolved, name string, write, container bool) (*Resolved,
 		_ = windows.CloseHandle(h)
 		return nil, err
 	}
-	return &Resolved{path: filepath.Join(parent.Path(), name), file: os.NewFile(uintptr(h), name), reparse: linked}, nil
+	return &Resolved{path: filepath.Join(parent.Path(), name), file: os.NewFile(uintptr(h), name), reparse: linked, parent: parent.File(), ownParent: false}, nil
 }
 
 // resolve walks every component with OPEN_REPARSE_POINT. A junction is thus
