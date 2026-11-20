@@ -74,11 +74,31 @@ func TestResolveFollowsLocalJunctionWithinAllowedVolume(t *testing.T) {
 	}
 }
 
+func TestResolveRejectsRemoteDirectoryLinkBeforeOpeningSMB(t *testing.T) {
+	root := t.TempDir()
+	link := filepath.Join(root, "remote")
+	makeRemoteDirectoryLink(t, link, `\\127.0.0.1\c$`)
+	defer os.Remove(link)
+
+	_, err := (Guard{Roots: []string{root}}).Resolve(filepath.Join(link, "canary"), false)
+	if !errors.Is(err, ErrOutside) {
+		t.Fatalf("resolve remote directory link: %v, want outside_allowed_volume", err)
+	}
+}
+
 func makeJunction(t *testing.T, link, target string) {
 	t.Helper()
 	output, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput()
 	if err != nil {
 		t.Fatalf("create junction: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+}
+
+func makeRemoteDirectoryLink(t *testing.T, link, target string) {
+	t.Helper()
+	output, err := exec.Command("cmd", "/c", "mklink", "/D", link, target).CombinedOutput()
+	if err != nil {
+		t.Fatalf("create remote directory link: %v: %s", err, strings.TrimSpace(string(output)))
 	}
 }
 
