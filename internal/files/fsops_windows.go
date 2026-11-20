@@ -73,6 +73,25 @@ func renameAt(source, parent *pathguard.Resolved, name string) error {
 	return nil
 }
 
+func deleteAt(resolved *pathguard.Resolved) error {
+	info, err := resolved.File().Stat()
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return ErrRecursiveDelete
+	}
+	h, err := fileHandle(resolved)
+	if err != nil {
+		return err
+	}
+	flags := uint32(windows.FILE_DISPOSITION_DELETE | windows.FILE_DISPOSITION_POSIX_SEMANTICS)
+	if err := windows.SetFileInformationByHandle(h, windows.FileDispositionInfoEx, (*byte)(unsafe.Pointer(&flags)), uint32(unsafe.Sizeof(flags))); err != nil {
+		return fmt.Errorf("delete by handle: %w", err)
+	}
+	return nil
+}
+
 func fileHandle(resolved *pathguard.Resolved) (windows.Handle, error) {
 	if resolved == nil || resolved.File() == nil {
 		return 0, fmt.Errorf("closed resolved handle")

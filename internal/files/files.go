@@ -17,7 +17,10 @@ import (
 	"github.com/danielrigobertojs/lanbay/internal/pathguard"
 )
 
-var ErrRecycleUnavailable = errors.New("recycle_unavailable")
+var (
+	ErrRecycleUnavailable = errors.New("recycle_unavailable")
+	ErrRecursiveDelete    = errors.New("recursive_delete_not_supported")
+)
 
 type Trash interface {
 	Delete(context.Context, string) error
@@ -206,17 +209,18 @@ func (m Manager) Delete(ctx context.Context, source string, options DeleteOption
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	p, err := m.Guard.Check(source, true)
+	r, err := m.Guard.Resolve(source, true)
 	if err != nil {
 		return err
 	}
+	defer r.Close()
 	if !options.Permanent {
 		if !options.Recycle || m.Trash == nil {
 			return ErrRecycleUnavailable
 		}
-		return m.Trash.Delete(ctx, p)
+		return m.Trash.Delete(ctx, r.Path())
 	}
-	return os.RemoveAll(p)
+	return deleteAt(r)
 }
 
 // Open resolves a file for a download. Directories are rejected so callers

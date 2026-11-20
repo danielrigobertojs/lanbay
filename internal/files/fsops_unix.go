@@ -17,3 +17,14 @@ func mkdirAt(parent *pathguard.Resolved, name string, mode os.FileMode) error {
 func renameAt(source, parent *pathguard.Resolved, name string) error {
 	return os.Rename(source.Path(), filepath.Join(parent.Path(), name))
 }
+
+func deleteAt(resolved *pathguard.Resolved) error {
+	info, err := resolved.File().Stat()
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return ErrRecursiveDelete
+	}
+	return os.Remove(resolved.Path())
+}

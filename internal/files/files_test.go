@@ -91,3 +91,18 @@ func TestMutationsRejectEscapingNames(t *testing.T) {
 		}
 	}
 }
+
+func TestPermanentDeleteRejectsDirectoryUntilRecursiveHandlesExist(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "directory")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	s := Service{Guard: pathguard.Guard{Roots: []string{root}}}
+	if err := s.Delete(context.Background(), dir, DeleteOptions{Permanent: true}); !errors.Is(err, ErrRecursiveDelete) {
+		t.Fatalf("delete directory: %v", err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("directory was changed: %v", err)
+	}
+}
