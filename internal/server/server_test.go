@@ -7,7 +7,6 @@ import (
 	"errors"
 	"github.com/danielrigobertojs/lanbay/internal/auth"
 	"github.com/danielrigobertojs/lanbay/internal/config"
-	"github.com/danielrigobertojs/lanbay/internal/files"
 	"github.com/danielrigobertojs/lanbay/internal/pathguard"
 	"github.com/danielrigobertojs/lanbay/internal/store"
 	"github.com/danielrigobertojs/lanbay/internal/volumes"
@@ -49,16 +48,6 @@ func TestRecycleAvailable(t *testing.T) {
 	}
 	if recycleAvailable(`E:\\file.txt`, items) {
 		t.Fatal("unknown volume must fail closed")
-	}
-}
-
-func TestFileErrorExplainsTemporarilyUnsupportedFolderOperations(t *testing.T) {
-	for _, err := range []error{files.ErrRecursiveDelete, files.ErrDirectoryCopy, files.ErrDirectoryZip} {
-		w := httptest.NewRecorder()
-		fileError(w, err)
-		if got := strings.TrimSpace(w.Body.String()); got != "Aún no disponible para carpetas en este volumen (JCB-473)" {
-			t.Errorf("fileError(%v) = %q", err, got)
-		}
 	}
 }
 

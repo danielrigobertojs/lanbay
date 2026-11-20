@@ -23,8 +23,9 @@ type Guard struct{ Roots, Protected []string }
 // Resolved is an authorized, opened filesystem object. Its fields are private
 // so only pathguard can construct it from a client-supplied path.
 type Resolved struct {
-	path string
-	file *os.File
+	path    string
+	file    *os.File
+	reparse bool
 }
 
 func (r *Resolved) Close() error {
@@ -54,6 +55,24 @@ func (r *Resolved) TakeFile() *os.File {
 // Path is canonical and intended only for display/logging, never for reopening
 // a mutating client operation.
 func (r *Resolved) Path() string { return r.path }
+
+// Reparse reports whether this handle names a reparse point. Walkers must not
+// traverse such entries: their target was deliberately not opened.
+func (r *Resolved) Reparse() bool { return r != nil && r.reparse }
+
+// OpenChild opens name relative to an already authorized directory handle.
+// It never follows a reparse point. container requests a handle suitable for
+// enumerating and changing descendants; write also grants deletion of the
+// child itself. This is intentionally an internal capability API.
+func OpenChild(parent *Resolved, name string, write, container bool) (*Resolved, error) {
+	if parent == nil || parent.file == nil {
+		return nil, fmt.Errorf("closed parent handle")
+	}
+	if err := lexicalName(name); err != nil {
+		return nil, err
+	}
+	return openChild(parent, name, write, container)
+}
 
 // Resolve validates client and opens its final object before returning it.
 func (g Guard) Resolve(client string, write bool) (*Resolved, error) {
@@ -85,6 +104,23 @@ func (g Guard) ResolveParent(client string) (*Resolved, error) {
 		return nil, fmt.Errorf("resolve parent: %w", err)
 	}
 	if _, err := g.authorizeParent(r.path); err != nil {
+		_ = r.Close()
+		return nil, err
+	}
+	return r, nil
+}
+
+// ResolveContainer is Resolve for a directory that will have its descendants
+// enumerated or changed. It is not valid for a regular file.
+func (g Guard) ResolveContainer(client string, write bool) (*Resolved, error) {
+	if err := lexical(client); err != nil {
+		return nil, err
+	}
+	r, err := resolveOpen(client, write, true)
+	if err != nil {
+		return nil, fmt.Errorf("resolve container: %w", err)
+	}
+	if _, err := g.authorize(r.path, write); err != nil {
 		_ = r.Close()
 		return nil, err
 	}

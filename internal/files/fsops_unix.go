@@ -20,13 +20,6 @@ func renameAt(source, parent *pathguard.Resolved, name string) error {
 }
 
 func deleteAt(resolved *pathguard.Resolved) error {
-	info, err := resolved.File().Stat()
-	if err != nil {
-		return err
-	}
-	if info.IsDir() {
-		return ErrRecursiveDelete
-	}
 	return os.Remove(resolved.Path())
 }
 

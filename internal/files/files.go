@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -19,9 +20,11 @@ import (
 
 var (
 	ErrRecycleUnavailable = errors.New("recycle_unavailable")
-	ErrRecursiveDelete    = errors.New("recursive_delete_not_supported")
-	ErrDirectoryCopy      = errors.New("directory_copy_not_supported")
-	ErrDirectoryZip       = errors.New("directory_zip_not_supported")
+)
+
+const (
+	maxWalkDepth   = 64
+	maxWalkEntries = 100000
 )
 
 type Trash interface {
@@ -194,13 +197,6 @@ func (m Manager) Copy(ctx context.Context, source, parent, name string) error {
 		return err
 	}
 	defer src.Close()
-	info, err := src.File().Stat()
-	if err != nil {
-		return err
-	}
-	if info.IsDir() {
-		return ErrDirectoryCopy
-	}
 	if _, err := m.Guard.CheckNew(parent, name, true); err != nil {
 		return err
 	}
@@ -209,6 +205,21 @@ func (m Manager) Copy(ctx context.Context, source, parent, name string) error {
 		return err
 	}
 	defer dstParent.Close()
+	info, err := src.File().Stat()
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		if err := mkdirAt(dstParent, name, info.Mode()); err != nil {
+			return err
+		}
+		dst, err := pathguard.OpenChild(dstParent, name, false, true)
+		if err != nil {
+			return err
+		}
+		defer dst.Close()
+		return copyTree(ctx, src, dst, 0, newWalkCount())
+	}
 	return copyFileAt(src, dstParent, name, info.Mode())
 }
 func (m Manager) CopyFile(ctx context.Context, source, parent, name string) (string, error) {
@@ -233,7 +244,22 @@ func (m Manager) Delete(ctx context.Context, source string, options DeleteOption
 		}
 		return m.Trash.Delete(ctx, r.Path())
 	}
-	return deleteAt(r)
+	info, err := r.File().Stat()
+	if err != nil || !info.IsDir() {
+		if err != nil {
+			return err
+		}
+		return deleteAt(r)
+	}
+	if err := r.Close(); err != nil {
+		return err
+	}
+	r, err = m.Guard.ResolveContainer(source, true)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	return deleteTree(ctx, r, 0, newWalkCount())
 }
 
 // Open resolves a file for a download. Directories are rejected so callers
@@ -268,15 +294,175 @@ func (m Manager) Zip(ctx context.Context, client string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if info.IsDir() {
-		return ErrDirectoryZip
-	}
 	z := zip.NewWriter(out)
 	defer z.Close()
+	if info.IsDir() {
+		return zipTree(ctx, z, r, filepath.Base(r.Path()), 0, newWalkCount())
+	}
 	w, err := z.Create(filepath.Base(r.Path()))
 	if err != nil {
 		return err
 	}
 	_, err = io.Copy(w, r.File())
 	return err
+}
+
+type walkCount struct{ entries int }
+
+func newWalkCount() *walkCount { return &walkCount{} }
+
+func (c *walkCount) add(ctx context.Context, depth int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if depth > maxWalkDepth {
+		return fmt.Errorf("directory walk depth exceeds %d", maxWalkDepth)
+	}
+	c.entries++
+	if c.entries > maxWalkEntries {
+		return fmt.Errorf("directory walk entries exceeds %d", maxWalkEntries)
+	}
+	return nil
+}
+
+// child opens a name relative to dir and deliberately refuses to traverse a
+// reparse point. Copy and ZIP omit it; deletion deletes the link itself.
+func child(ctx context.Context, dir *pathguard.Resolved, name string, write bool, depth int, count *walkCount) (*pathguard.Resolved, os.FileInfo, error) {
+	if err := count.add(ctx, depth); err != nil {
+		return nil, nil, err
+	}
+	r, err := pathguard.OpenChild(dir, name, write, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := r.File().Stat()
+	if err != nil {
+		_ = r.Close()
+		return nil, nil, err
+	}
+	return r, info, nil
+}
+
+func copyTree(ctx context.Context, source, destination *pathguard.Resolved, depth int, count *walkCount) error {
+	entries, err := source.File().ReadDir(-1)
+	if err != nil {
+		return fmt.Errorf("read source directory: %w", err)
+	}
+	for _, entry := range entries {
+		src, info, err := child(ctx, source, entry.Name(), false, depth+1, count)
+		if err != nil {
+			return err
+		}
+		if src.Reparse() {
+			slog.Warn("omitting reparse point from copy", "path", src.Path())
+			_ = src.Close()
+			continue
+		}
+		if info.IsDir() {
+			_ = src.Close()
+			src, err = pathguard.OpenChild(source, entry.Name(), false, true)
+			if err != nil {
+				return err
+			}
+			if err = mkdirAt(destination, entry.Name(), info.Mode()); err != nil {
+				_ = src.Close()
+				return err
+			}
+			dst, err := pathguard.OpenChild(destination, entry.Name(), false, true)
+			if err != nil {
+				_ = src.Close()
+				return err
+			}
+			err = copyTree(ctx, src, dst, depth+1, count)
+			_ = dst.Close()
+			_ = src.Close()
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		err = copyFileAt(src, destination, entry.Name(), info.Mode())
+		_ = src.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func deleteTree(ctx context.Context, node *pathguard.Resolved, depth int, count *walkCount) error {
+	if err := count.add(ctx, depth); err != nil {
+		return err
+	}
+	info, err := node.File().Stat()
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || node.Reparse() {
+		return deleteAt(node)
+	}
+	entries, err := node.File().ReadDir(-1)
+	if err != nil {
+		return fmt.Errorf("read directory for delete: %w", err)
+	}
+	for _, entry := range entries {
+		childNode, childInfo, err := child(ctx, node, entry.Name(), true, depth+1, count)
+		if err != nil {
+			return err
+		}
+		if childInfo.IsDir() && !childNode.Reparse() {
+			_ = childNode.Close()
+			childNode, err = pathguard.OpenChild(node, entry.Name(), true, true)
+			if err != nil {
+				return err
+			}
+		}
+		err = deleteTree(ctx, childNode, depth+1, count)
+		_ = childNode.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return deleteAt(node)
+}
+
+func zipTree(ctx context.Context, z *zip.Writer, dir *pathguard.Resolved, prefix string, depth int, count *walkCount) error {
+	entries, err := dir.File().ReadDir(-1)
+	if err != nil {
+		return fmt.Errorf("read directory for zip: %w", err)
+	}
+	for _, entry := range entries {
+		node, info, err := child(ctx, dir, entry.Name(), false, depth+1, count)
+		if err != nil {
+			return err
+		}
+		name := filepath.ToSlash(filepath.Join(prefix, entry.Name()))
+		if node.Reparse() {
+			slog.Warn("omitting reparse point from zip", "path", node.Path())
+			_ = node.Close()
+			continue
+		}
+		if info.IsDir() {
+			_ = node.Close()
+			node, err = pathguard.OpenChild(dir, entry.Name(), false, true)
+			if err != nil {
+				return err
+			}
+			err = zipTree(ctx, z, node, name, depth+1, count)
+			_ = node.Close()
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		w, err := z.Create(name)
+		if err == nil {
+			_, err = io.Copy(w, node.File())
+		}
+		_ = node.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
