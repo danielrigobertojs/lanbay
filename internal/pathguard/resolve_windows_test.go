@@ -5,6 +5,10 @@ package pathguard
 
 import (
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -33,5 +37,37 @@ func TestLocalReparseDestinationAcceptsLocalTargets(t *testing.T) {
 		if got == "" {
 			t.Fatalf("target %q returned empty path", target)
 		}
+	}
+}
+
+func TestResolveFollowsLocalJunctionWithinAllowedVolume(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	link := filepath.Join(root, "link")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(target, "inside.txt")
+	if err := os.WriteFile(file, []byte("ok"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	makeJunction(t, link, target)
+	defer os.Remove(link)
+
+	r, err := (Guard{Roots: []string{root}}).Resolve(filepath.Join(link, "inside.txt"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if !samePath(r.Path(), file) {
+		t.Fatalf("resolved path = %q, want %q", r.Path(), file)
+	}
+}
+
+func makeJunction(t *testing.T, link, target string) {
+	t.Helper()
+	output, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput()
+	if err != nil {
+		t.Fatalf("create junction: %v: %s", err, strings.TrimSpace(string(output)))
 	}
 }
