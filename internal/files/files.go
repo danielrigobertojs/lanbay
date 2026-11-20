@@ -55,11 +55,13 @@ type Manager struct {
 type Service = Manager
 
 func (m Manager) List(ctx context.Context, client string, opt ListOptions) (Listing, error) {
-	p, err := m.Guard.Check(client, false)
+	r, err := m.Guard.Resolve(client, false)
 	if err != nil {
 		return Listing{}, err
 	}
-	dirs, err := os.ReadDir(p)
+	defer r.Close()
+	p := r.Path()
+	dirs, err := r.File().ReadDir(-1)
 	if err != nil {
 		return Listing{}, fmt.Errorf("read directory: %w", err)
 	}
@@ -203,14 +205,12 @@ func (m Manager) Delete(ctx context.Context, source string, options DeleteOption
 // Open resolves a file for a download. Directories are rejected so callers
 // must use Zip, keeping content-disposition policy at the HTTP boundary.
 func (m Manager) Open(client string) (*os.File, os.FileInfo, error) {
-	p, err := m.Guard.Check(client, false)
+	r, err := m.Guard.Resolve(client, false)
 	if err != nil {
 		return nil, nil, err
 	}
-	f, err := os.Open(p)
-	if err != nil {
-		return nil, nil, err
-	}
+	defer r.Close()
+	f := r.File()
 	info, err := f.Stat()
 	if err != nil || info.IsDir() {
 		_ = f.Close()
@@ -219,7 +219,7 @@ func (m Manager) Open(client string) (*os.File, os.FileInfo, error) {
 		}
 		return nil, nil, err
 	}
-	return f, info, nil
+	return r.TakeFile(), info, nil
 }
 func copyPath(ctx context.Context, src, dst string) error {
 	info, err := os.Stat(src)

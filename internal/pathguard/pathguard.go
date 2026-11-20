@@ -40,6 +40,17 @@ func (r *Resolved) Close() error {
 // filesystem boundary; callers must not close it separately.
 func (r *Resolved) File() *os.File { return r.file }
 
+// TakeFile transfers ownership of the validated handle to the caller. It is
+// for downloads and other operations that must outlive Resolved itself.
+func (r *Resolved) TakeFile() *os.File {
+	if r == nil {
+		return nil
+	}
+	f := r.file
+	r.file = nil
+	return f
+}
+
 // Path is canonical and intended only for display/logging, never for reopening
 // a mutating client operation.
 func (r *Resolved) Path() string { return r.path }
