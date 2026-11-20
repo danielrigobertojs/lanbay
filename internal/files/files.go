@@ -247,9 +247,21 @@ func (m Manager) Delete(ctx context.Context, source string, options DeleteOption
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	r, err := m.Guard.ResolveWalk(source, true)
+	r, err := m.Guard.Resolve(source, true)
 	if err != nil {
 		return err
+	}
+	info, err := r.File().Stat()
+	if err != nil {
+		_ = r.Close()
+		return err
+	}
+	if info.IsDir() {
+		_ = r.Close()
+		r, err = m.Guard.ResolveWalk(source, true)
+		if err != nil {
+			return err
+		}
 	}
 	defer r.Close()
 	if !options.Permanent {

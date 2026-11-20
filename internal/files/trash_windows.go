@@ -26,9 +26,9 @@ var (
 	shell32                         = windows.NewLazySystemDLL("shell32.dll")
 	procCoCreateInstance            = ole32.NewProc("CoCreateInstance")
 	procSHCreateItemFromParsingName = shell32.NewProc("SHCreateItemFromParsingName")
-	clsidFileOperation              = mustGUID("{3AD05575-8857-4850-9277-11B85BDB8E09}")
-	iidFileOperation                = mustGUID("{947AAB5F-0A5C-4C13-B4D6-4BF7836A9E2}")
-	iidShellItem                    = mustGUID("{43826D1E-E718-42EE-BC55-A1E261C37BFE}")
+	clsidFileOperation              = windows.GUID{0x3AD05575, 0x8857, 0x4850, [8]byte{0x92, 0x77, 0x11, 0xB8, 0x5B, 0xDB, 0x8E, 0x09}}
+	iidFileOperation                = windows.GUID{0x947AAB5F, 0x0A5C, 0x4C13, [8]byte{0xB4, 0xD6, 0x4B, 0xF7, 0x83, 0x6F, 0xC9, 0xF8}}
+	iidShellItem                    = windows.GUID{0x43826D1E, 0xE718, 0x42EE, [8]byte{0xBC, 0x55, 0xA1, 0xE2, 0x61, 0xC3, 0x7B, 0xFE}}
 )
 
 type windowsTrash struct{}
@@ -100,11 +100,4 @@ func hresult(r uintptr) error {
 		return syscall.Errno(uint32(r))
 	}
 	return nil
-}
-func mustGUID(s string) windows.GUID {
-	g, err := windows.GUIDFromString(s)
-	if err != nil {
-		panic(err)
-	}
-	return g
 }
