@@ -4,6 +4,7 @@ package files
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -104,5 +105,17 @@ func TestPermanentDeleteRejectsDirectoryUntilRecursiveHandlesExist(t *testing.T)
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("directory was changed: %v", err)
+	}
+}
+
+func TestZipRejectsDirectoryUntilRelativeWalkerExists(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "directory")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	s := Service{Guard: pathguard.Guard{Roots: []string{root}}}
+	if err := s.Zip(context.Background(), dir, io.Discard); !errors.Is(err, ErrDirectoryZip) {
+		t.Fatalf("zip directory: %v", err)
 	}
 }

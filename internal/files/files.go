@@ -21,6 +21,7 @@ var (
 	ErrRecycleUnavailable = errors.New("recycle_unavailable")
 	ErrRecursiveDelete    = errors.New("recursive_delete_not_supported")
 	ErrDirectoryCopy      = errors.New("directory_copy_not_supported")
+	ErrDirectoryZip       = errors.New("directory_zip_not_supported")
 )
 
 type Trash interface {
@@ -255,33 +256,27 @@ func (m Manager) Open(client string) (*os.File, os.FileInfo, error) {
 	return r.TakeFile(), info, nil
 }
 func (m Manager) Zip(ctx context.Context, client string, out io.Writer) error {
-	p, err := m.Guard.Check(client, false)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r, err := m.Guard.Resolve(client, false)
 	if err != nil {
 		return err
 	}
+	defer r.Close()
+	info, err := r.File().Stat()
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return ErrDirectoryZip
+	}
 	z := zip.NewWriter(out)
 	defer z.Close()
-	return filepath.Walk(p, func(name string, info os.FileInfo, e error) error {
-		if e != nil {
-			return e
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
-		rel, _ := filepath.Rel(filepath.Dir(p), name)
-		w, e := z.Create(rel)
-		if e != nil {
-			return e
-		}
-		f, e := os.Open(name)
-		if e != nil {
-			return e
-		}
-		defer f.Close()
-		_, e = io.Copy(w, f)
-		return e
-	})
+	w, err := z.Create(filepath.Base(r.Path()))
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(w, r.File())
+	return err
 }
