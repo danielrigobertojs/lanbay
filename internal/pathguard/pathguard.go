@@ -39,18 +39,14 @@ func (g Guard) CheckNew(parent, name string, write bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if write {
-		for _, protected := range g.Protected {
-			canonical, e := resolve(protected)
-			if e != nil {
-				return "", fmt.Errorf("resolve protected zone: %w", e)
-			}
-			if within(p, canonical) {
-				return "", ErrProtected
-			}
-		}
+	result, err := g.authorize(filepath.Join(p, name), write)
+	if err != nil {
+		return "", err
 	}
-	return filepath.Join(p, name), nil
+	if !samePath(filepath.Dir(result), p) {
+		return "", ErrInvalid
+	}
+	return result, nil
 }
 
 // CheckTransfer authorizes both ends of a copy or move. The source is checked
@@ -132,7 +128,7 @@ func lexicalName(part string) error {
 	if part == "" {
 		return nil
 	}
-	if part == "." || part == ".." || strings.TrimRight(part, ". ") != part || reserved(part) {
+	if part == "." || part == ".." || strings.ContainsAny(part, `\\/`) || strings.TrimRight(part, ". ") != part || reserved(part) {
 		return ErrInvalid
 	}
 	for _, r := range part {

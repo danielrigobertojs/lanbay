@@ -76,3 +76,17 @@ func TestCheckTransferRejectsProtectedSourceAndDestination(t *testing.T) {
 		t.Fatalf("protected destination: %v", err)
 	}
 }
+
+func TestCheckNewRejectsSeparatorsAndEscapes(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "safe")
+	if err := os.Mkdir(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	g := Guard{Roots: []string{root}}
+	for _, name := range []string{`..\\Windows\\evil`, "../Windows/evil", `a\\..\\..\\Windows\\evil`, filepath.Join(root, "absolute")} {
+		if _, err := g.CheckNew(parent, name, true); !errors.Is(err, ErrInvalid) {
+			t.Errorf("name %q: %v", name, err)
+		}
+	}
+}
