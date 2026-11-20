@@ -113,6 +113,24 @@ func TestResolveParentRaceCannotCreateInProtectedJunctionTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := Guard{Roots: []string{root}, Protected: []string{canary}}
+	// Establish S1 deterministically before the attacker is allowed to remove
+	// the entry name. The subsequent loop races the same relative creation
+	// against junction swaps; the control file is removed so swaps remain
+	// possible on Windows.
+	control, err := g.ResolveParent(entry)
+	if err != nil {
+		t.Fatalf("resolve stable parent: %v", err)
+	}
+	if err := createRelativeFile(control, "control"); err != nil {
+		_ = control.Close()
+		t.Fatalf("create through resolved parent: %v", err)
+	}
+	if err := control.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(entry, "control")); err != nil {
+		t.Fatalf("remove control file: %v", err)
+	}
 	stop := make(chan struct{})
 	var done sync.WaitGroup
 	done.Add(1)

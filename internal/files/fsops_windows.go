@@ -4,6 +4,7 @@
 package files
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -68,7 +69,14 @@ func renameAt(source, parent *pathguard.Resolved, name string) error {
 	info.RootDirectory = parentHandle
 	info.FileNameLength = uint32(nameBytes)
 	copy((*[windows.MAX_LONG_PATH]uint16)(unsafe.Pointer(&info.FileName[0]))[:len(name16)-1], name16[:len(name16)-1])
-	if err := windows.SetFileInformationByHandle(sourceHandle, windows.FileRenameInfoEx, &buf[0], uint32(len(buf))); err != nil {
+	err = windows.SetFileInformationByHandle(sourceHandle, windows.FileRenameInfoEx, &buf[0], uint32(len(buf)))
+	if exUnsupported(err) {
+		// FAT-family filesystems do not support FileRenameInfoEx. The legacy
+		// information class retains the same RootDirectory handle, so it does
+		// not reopen an untrusted destination path.
+		err = windows.SetFileInformationByHandle(sourceHandle, windows.FileRenameInfo, &buf[0], uint32(len(buf)))
+	}
+	if err != nil {
 		return fmt.Errorf("rename by handle: %w", err)
 	}
 	return nil
@@ -86,11 +94,22 @@ func deleteAt(resolved *pathguard.Resolved) error {
 	if err != nil {
 		return err
 	}
-	flags := uint32(windows.FILE_DISPOSITION_DELETE | windows.FILE_DISPOSITION_POSIX_SEMANTICS)
-	if err := windows.SetFileInformationByHandle(h, windows.FileDispositionInfoEx, (*byte)(unsafe.Pointer(&flags)), uint32(unsafe.Sizeof(flags))); err != nil {
+	flags := uint32(windows.FILE_DISPOSITION_DELETE | windows.FILE_DISPOSITION_POSIX_SEMANTICS | windows.FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE)
+	err = windows.SetFileInformationByHandle(h, windows.FileDispositionInfoEx, (*byte)(unsafe.Pointer(&flags)), uint32(unsafe.Sizeof(flags)))
+	if exUnsupported(err) {
+		// FAT32 lacks the extended disposition class. Retry against this exact
+		// validated handle using the legacy, portable form.
+		legacy := uint32(1)
+		err = windows.SetFileInformationByHandle(h, windows.FileDispositionInfo, (*byte)(unsafe.Pointer(&legacy)), uint32(unsafe.Sizeof(legacy)))
+	}
+	if err != nil {
 		return fmt.Errorf("delete by handle: %w", err)
 	}
 	return nil
+}
+
+func exUnsupported(err error) bool {
+	return errors.Is(err, windows.ERROR_INVALID_PARAMETER) || errors.Is(err, windows.ERROR_NOT_SUPPORTED)
 }
 
 func copyFileAt(source, parent *pathguard.Resolved, name string, _ os.FileMode) error {

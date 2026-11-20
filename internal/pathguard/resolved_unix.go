@@ -5,7 +5,7 @@ package pathguard
 
 import "os"
 
-func resolveOpen(path string, _ bool) (*Resolved, error) {
+func resolveOpen(path string, _ bool, _ bool) (*Resolved, error) {
 	p, err := resolve(path)
 	if err != nil {
 		return nil, err
