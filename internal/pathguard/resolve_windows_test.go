@@ -59,8 +59,12 @@ func TestResolveFollowsLocalJunctionWithinAllowedVolume(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Close()
-	if !samePath(r.Path(), file) {
-		t.Fatalf("resolved path = %q, want %q", r.Path(), file)
+	want, err := resolve(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(r.Path(), want) {
+		t.Fatalf("resolved path = %q, want %q", r.Path(), want)
 	}
 }
 
