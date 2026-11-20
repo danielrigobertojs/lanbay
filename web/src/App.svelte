@@ -9,7 +9,7 @@
   function crumbs(){const s=path.replaceAll('\\','/'), p=s.split('/').filter(Boolean);return p.map((x,i)=>({x,path:s.match(/^[A-Za-z]:\//)?p.slice(0,i+1).join('/')+'/':'/'+p.slice(0,i+1).join('/')}))}
   async function mkdir(){if(!newName)return;const r=await fetch('/api/v1/files/mkdir',{method:'POST',headers:headers(),body:JSON.stringify({parent:path,name:newName})});if(!r.ok){error=await r.text();return};newName='';open(path)}
   async function rename(e){const name=prompt('Nuevo nombre',e.name);if(!name)return;const r=await fetch('/api/v1/files/rename',{method:'POST',headers:headers(),body:JSON.stringify({path:e.path,name})});if(!r.ok){error=await r.text();return};open(path)}
-  async function remove(e){if(!confirm(`Borrar 1 elemento: ${e.name}?`))return;const r=await fetch('/api/v1/files',{method:'DELETE',headers:headers(),body:JSON.stringify({path:e.path,permanent:true})});if(!r.ok){error=await r.text();return};open(path)}
+  async function remove(e){const volume=volumes.find(v=>e.path.toLowerCase().startsWith(v.id.toLowerCase()));const permanent=!volume?.recycle;const scope=permanent?`Borrar permanentemente 1 elemento: ${e.name}?`:`Enviar a la Papelera 1 elemento: ${e.name}?`;if(!confirm(scope))return;const r=await fetch('/api/v1/files',{method:'DELETE',headers:headers(),body:JSON.stringify({path:e.path,permanent})});if(!r.ok){error=await r.text();return};open(path)}
 </script>
 <svelte:head><title>Lanbay</title></svelte:head>
 {#if !csrf}<main class="login"><section><h1>Lanbay</h1><label>Contraseña <input type="password" bind:value={password}/></label><button on:click={login}>Iniciar sesión</button>{#if error}<p class="error">{error}</p>{/if}</section></main>
