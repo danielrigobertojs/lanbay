@@ -5,6 +5,7 @@ package pathguard
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -19,15 +20,53 @@ var (
 
 type Guard struct{ Roots, Protected []string }
 
-func (g Guard) Check(client string, write bool) (string, error) {
+// Resolved is an authorized, opened filesystem object. Its fields are private
+// so only pathguard can construct it from a client-supplied path.
+type Resolved struct {
+	path string
+	file *os.File
+}
+
+func (r *Resolved) Close() error {
+	if r == nil || r.file == nil {
+		return nil
+	}
+	err := r.file.Close()
+	r.file = nil
+	return err
+}
+
+// File returns the already-open validated handle. It is for the internal
+// filesystem boundary; callers must not close it separately.
+func (r *Resolved) File() *os.File { return r.file }
+
+// Path is canonical and intended only for display/logging, never for reopening
+// a mutating client operation.
+func (r *Resolved) Path() string { return r.path }
+
+// Resolve validates client and opens its final object before returning it.
+func (g Guard) Resolve(client string, write bool) (*Resolved, error) {
 	if err := lexical(client); err != nil {
+		return nil, err
+	}
+	r, err := resolveOpen(client, write)
+	if err != nil {
+		return nil, fmt.Errorf("resolve existing path: %w", err)
+	}
+	if _, err := g.authorize(r.path, write); err != nil {
+		_ = r.Close()
+		return nil, err
+	}
+	return r, nil
+}
+
+func (g Guard) Check(client string, write bool) (string, error) {
+	r, err := g.Resolve(client, write)
+	if err != nil {
 		return "", err
 	}
-	p, err := resolve(client)
-	if err != nil {
-		return "", fmt.Errorf("resolve existing path: %w", err)
-	}
-	return g.authorize(p, write)
+	defer r.Close()
+	return r.path, nil
 }
 
 // CheckNew validates an untrusted leaf below an existing, authorized parent.

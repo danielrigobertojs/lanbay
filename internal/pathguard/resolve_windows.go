@@ -6,13 +6,110 @@ package pathguard
 import (
 	"encoding/binary"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
 const maxReparseHops = 8
+
+// resolveOpen retains the final handle while walking each child relative to an
+// already-open parent. OBJ_DONT_REPARSE prevents a directory swapped after its
+// inspection from being followed by the next open.
+func resolveOpen(path string, write bool) (*Resolved, error) {
+	access := uint32(windows.FILE_GENERIC_READ)
+	if write {
+		access |= windows.FILE_GENERIC_WRITE | windows.DELETE
+	}
+	current := filepath.Clean(path)
+	for hops := 0; ; {
+		volume := filepath.VolumeName(current)
+		if len(volume) != 2 || volume[1] != ':' {
+			return nil, fmt.Errorf("non-DOS reparse destination: %w", ErrOutside)
+		}
+		base := volume + `\`
+		parent, err := openReparsePoint(base)
+		if err != nil {
+			return nil, err
+		}
+		parts := strings.FieldsFunc(strings.TrimPrefix(current[len(volume):], `\`), func(r rune) bool { return r == '\\' || r == '/' })
+		if len(parts) == 0 {
+			canonical, err := finalDOSPath(parent)
+			if err != nil {
+				_ = windows.CloseHandle(parent)
+				return nil, err
+			}
+			return &Resolved{path: canonical, file: os.NewFile(uintptr(parent), canonical)}, nil
+		}
+		restarted := false
+		for i, part := range parts {
+			child, err := openRelative(parent, part, access)
+			if err != nil {
+				_ = windows.CloseHandle(parent)
+				return nil, err
+			}
+			target, linked, err := reparseTarget(child)
+			if err != nil {
+				_ = windows.CloseHandle(child)
+				_ = windows.CloseHandle(parent)
+				return nil, err
+			}
+			if linked {
+				hops++
+				if hops > maxReparseHops {
+					_ = windows.CloseHandle(child)
+					_ = windows.CloseHandle(parent)
+					return nil, fmt.Errorf("too many reparse points: %w", ErrInvalid)
+				}
+				next, err := localReparseDestination(filepath.Dir(filepath.Join(base, part)), target)
+				_ = windows.CloseHandle(child)
+				_ = windows.CloseHandle(parent)
+				if err != nil {
+					return nil, err
+				}
+				if i+1 < len(parts) {
+					next = filepath.Join(append([]string{next}, parts[i+1:]...)...)
+				}
+				current, restarted = next, true
+				break
+			}
+			_ = windows.CloseHandle(parent)
+			if i == len(parts)-1 {
+				canonical, err := finalDOSPath(child)
+				if err != nil {
+					_ = windows.CloseHandle(child)
+					return nil, err
+				}
+				return &Resolved{path: canonical, file: os.NewFile(uintptr(child), canonical)}, nil
+			}
+			parent = child
+			base = filepath.Join(base, part)
+		}
+		if restarted {
+			continue
+		}
+	}
+}
+
+func openRelative(parent windows.Handle, name string, access uint32) (windows.Handle, error) {
+	objectName, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return 0, err
+	}
+	oa := &windows.OBJECT_ATTRIBUTES{Length: uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})), RootDirectory: parent, ObjectName: objectName, Attributes: windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE}
+	var handle windows.Handle
+	var status windows.IO_STATUS_BLOCK
+	err = windows.NtCreateFile(&handle, access, oa, &status, nil, 0,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		windows.FILE_OPEN, windows.FILE_OPEN_REPARSE_POINT|windows.FILE_OPEN_FOR_BACKUP_INTENT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+	if err != nil {
+		return 0, err
+	}
+	return handle, nil
+}
 
 // resolve walks every component with OPEN_REPARSE_POINT. A junction is thus
 // inspected before its target is opened, preventing SMB/NTLM authentication
