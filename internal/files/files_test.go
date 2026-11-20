@@ -64,3 +64,30 @@ func TestDeleteFailsClosedWithoutRecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMutationsRejectEscapingNames(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "safe")
+	if err := os.Mkdir(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(parent, "source.txt")
+	if err := os.WriteFile(source, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := Service{Guard: pathguard.Guard{Roots: []string{root}}}
+	for _, name := range []string{`..\\escape`, "../escape", `a\\..\\..`, filepath.Join(root, "absolute")} {
+		if _, err := s.Mkdir(context.Background(), parent, name); !errors.Is(err, pathguard.ErrInvalid) {
+			t.Errorf("mkdir %q: %v", name, err)
+		}
+		if _, err := s.Rename(context.Background(), source, parent, name); !errors.Is(err, pathguard.ErrInvalid) {
+			t.Errorf("rename %q: %v", name, err)
+		}
+		if err := s.Move(context.Background(), source, parent, name); !errors.Is(err, pathguard.ErrInvalid) {
+			t.Errorf("move %q: %v", name, err)
+		}
+		if err := s.Copy(context.Background(), source, parent, name); !errors.Is(err, pathguard.ErrInvalid) {
+			t.Errorf("copy %q: %v", name, err)
+		}
+	}
+}
