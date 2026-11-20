@@ -192,13 +192,17 @@ func (m Manager) Copy(ctx context.Context, source, parent, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	src, err := m.Guard.Resolve(source, false)
+	src, err := m.Guard.ResolveWalk(source, false)
 	if err != nil {
 		return err
 	}
 	defer src.Close()
-	if _, err := m.Guard.CheckNew(parent, name, true); err != nil {
+	destination, err := m.Guard.CheckNew(parent, name, true)
+	if err != nil {
 		return err
+	}
+	if isWithin(destination, src.Path()) {
+		return fmt.Errorf("cannot copy a directory into itself")
 	}
 	dstParent, err := m.Guard.ResolveParent(parent)
 	if err != nil {
@@ -233,7 +237,7 @@ func (m Manager) Delete(ctx context.Context, source string, options DeleteOption
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	r, err := m.Guard.Resolve(source, true)
+	r, err := m.Guard.ResolveWalk(source, true)
 	if err != nil {
 		return err
 	}
@@ -244,28 +248,13 @@ func (m Manager) Delete(ctx context.Context, source string, options DeleteOption
 		}
 		return m.Trash.Delete(ctx, r.Path())
 	}
-	info, err := r.File().Stat()
-	if err != nil || !info.IsDir() {
-		if err != nil {
-			return err
-		}
-		return deleteAt(r)
-	}
-	if err := r.Close(); err != nil {
-		return err
-	}
-	r, err = m.Guard.ResolveContainer(source, true)
-	if err != nil {
-		return err
-	}
-	defer r.Close()
 	return deleteTree(ctx, r, 0, newWalkCount())
 }
 
 // Open resolves a file for a download. Directories are rejected so callers
 // must use Zip, keeping content-disposition policy at the HTTP boundary.
 func (m Manager) Open(client string) (*os.File, os.FileInfo, error) {
-	r, err := m.Guard.Resolve(client, false)
+	r, err := m.Guard.ResolveWalk(client, false)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -335,6 +324,9 @@ func child(ctx context.Context, dir *pathguard.Resolved, name string, write bool
 	if err != nil {
 		return nil, nil, err
 	}
+	if r.Reparse() {
+		return r, nil, nil
+	}
 	info, err := r.File().Stat()
 	if err != nil {
 		_ = r.Close()
@@ -363,6 +355,10 @@ func copyTree(ctx context.Context, source, destination *pathguard.Resolved, dept
 			src, err = pathguard.OpenChild(source, entry.Name(), false, true)
 			if err != nil {
 				return err
+			}
+			if src.Reparse() {
+				_ = src.Close()
+				continue
 			}
 			if err = mkdirAt(destination, entry.Name(), info.Mode()); err != nil {
 				_ = src.Close()
@@ -394,11 +390,14 @@ func deleteTree(ctx context.Context, node *pathguard.Resolved, depth int, count 
 	if err := count.add(ctx, depth); err != nil {
 		return err
 	}
+	if node.Reparse() {
+		return deleteAt(node)
+	}
 	info, err := node.File().Stat()
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() || node.Reparse() {
+	if !info.IsDir() {
 		return deleteAt(node)
 	}
 	entries, err := node.File().ReadDir(-1)
@@ -410,11 +409,27 @@ func deleteTree(ctx context.Context, node *pathguard.Resolved, depth int, count 
 		if err != nil {
 			return err
 		}
-		if childInfo.IsDir() && !childNode.Reparse() {
+		if childNode.Reparse() {
+			err = deleteAt(childNode)
+			_ = childNode.Close()
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		if childInfo.IsDir() {
 			_ = childNode.Close()
 			childNode, err = pathguard.OpenChild(node, entry.Name(), true, true)
 			if err != nil {
 				return err
+			}
+			if childNode.Reparse() {
+				err = deleteAt(childNode)
+				_ = childNode.Close()
+				if err != nil {
+					return err
+				}
+				continue
 			}
 		}
 		err = deleteTree(ctx, childNode, depth+1, count)
@@ -448,6 +463,10 @@ func zipTree(ctx context.Context, z *zip.Writer, dir *pathguard.Resolved, prefix
 			if err != nil {
 				return err
 			}
+			if node.Reparse() {
+				_ = node.Close()
+				continue
+			}
 			err = zipTree(ctx, z, node, name, depth+1, count)
 			_ = node.Close()
 			if err != nil {
@@ -465,4 +484,9 @@ func zipTree(ctx context.Context, z *zip.Writer, dir *pathguard.Resolved, prefix
 		}
 	}
 	return nil
+}
+
+func isWithin(path, parent string) bool {
+	rel, err := filepath.Rel(parent, path)
+	return err == nil && (rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))))
 }

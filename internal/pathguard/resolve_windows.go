@@ -39,6 +39,18 @@ func resolveOpen(path string, write, container bool) (*Resolved, error) {
 		// permits operations on a readonly file.
 		finalAccess = windows.DELETE | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE
 	}
+	return resolveOpenAccess(path, finalAccess)
+}
+
+func resolveWalkOpen(path string, write bool) (*Resolved, error) {
+	access := uint32(windows.FILE_LIST_DIRECTORY | windows.FILE_TRAVERSE | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE)
+	if write {
+		access |= windows.DELETE
+	}
+	return resolveOpenAccess(path, access)
+}
+
+func resolveOpenAccess(path string, finalAccess uint32) (*Resolved, error) {
 	current := filepath.Clean(path)
 	for hops := 0; ; {
 		volume := filepath.VolumeName(current)

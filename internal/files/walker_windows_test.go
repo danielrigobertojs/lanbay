@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -63,13 +62,16 @@ func TestDirectoryWalkerSkipsLocalAndRemoteReparsePoints(t *testing.T) {
 	}
 }
 
-func TestDirectoryWalkerRaceDoesNotWriteThroughJunction(t *testing.T) {
+func TestDirectoryWalkerRaceDoesNotFollowJunctionForZipOrDelete(t *testing.T) {
 	root := t.TempDir()
 	source, canary := filepath.Join(root, "source"), filepath.Join(root, "canary")
 	if err := os.Mkdir(source, 0700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(canary, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canary, "secret.txt"), []byte("canary secret"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	entry := filepath.Join(source, "entry")
@@ -95,16 +97,19 @@ func TestDirectoryWalkerRaceDoesNotWriteThroughJunction(t *testing.T) {
 	}()
 	m := Manager{Guard: pathguard.Guard{Roots: []string{root}, Protected: []string{canary}}}
 	for i := 0; i < 100; i++ {
-		_ = m.Copy(context.Background(), source, root, "copy-"+strconv.Itoa(i))
+		var zipped bytes.Buffer
+		_ = m.Zip(context.Background(), source, &zipped)
+		if bytes.Contains(zipped.Bytes(), []byte("canary secret")) {
+			t.Fatal("race included canary in ZIP")
+		}
+		_ = m.Delete(context.Background(), source, DeleteOptions{Permanent: true})
+		_ = os.Mkdir(source, 0700)
+		_ = os.Mkdir(entry, 0700)
 	}
 	close(stop)
 	wg.Wait()
-	entries, err := os.ReadDir(canary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("race wrote through junction: %#v", entries)
+	if data, err := os.ReadFile(filepath.Join(canary, "secret.txt")); err != nil || string(data) != "canary secret" {
+		t.Fatalf("race deleted canary: %q, %v", data, err)
 	}
 }
 

@@ -127,6 +127,23 @@ func (g Guard) ResolveContainer(client string, write bool) (*Resolved, error) {
 	return r, nil
 }
 
+// ResolveWalk opens a root for recursive enumeration and, when requested,
+// deletion. Unlike ResolveParent it does not request creation rights.
+func (g Guard) ResolveWalk(client string, write bool) (*Resolved, error) {
+	if err := lexical(client); err != nil {
+		return nil, err
+	}
+	r, err := resolveWalkOpen(client, write)
+	if err != nil {
+		return nil, fmt.Errorf("resolve walk root: %w", err)
+	}
+	if _, err := g.authorize(r.path, write); err != nil {
+		_ = r.Close()
+		return nil, err
+	}
+	return r, nil
+}
+
 func (g Guard) Check(client string, write bool) (string, error) {
 	r, err := g.Resolve(client, write)
 	if err != nil {

@@ -149,3 +149,52 @@ func TestCopyDirectoryAndHonorsCancelledContext(t *testing.T) {
 		t.Fatalf("cancelled copy: %v", err)
 	}
 }
+
+func TestCopyDirectoryRejectsDestinationInsideSource(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	if err := os.Mkdir(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "item"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := Service{Guard: pathguard.Guard{Roots: []string{root}}}
+	if err := s.Copy(context.Background(), source, source, "copy"); err == nil {
+		t.Fatal("copy into source succeeded")
+	}
+	if _, err := os.Stat(filepath.Join(source, "copy")); !os.IsNotExist(err) {
+		t.Fatalf("partial nested copy: %v", err)
+	}
+}
+
+func TestDirectoryWalkerSkipsAndDeletesSymlink(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	source := filepath.Join(root, "source")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "canary"), []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(source, "link")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	s := Service{Guard: pathguard.Guard{Roots: []string{root}}}
+	if err := s.Copy(context.Background(), source, root, "copy"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "copy", "link")); !os.IsNotExist(err) {
+		t.Fatalf("symlink copied: %v", err)
+	}
+	if err := s.Delete(context.Background(), source, DeleteOptions{Permanent: true}); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(target, "canary")); err != nil || string(data) != "keep" {
+		t.Fatalf("symlink target changed: %q, %v", data, err)
+	}
+}
