@@ -71,6 +71,24 @@ func (g Guard) Resolve(client string, write bool) (*Resolved, error) {
 	return r, nil
 }
 
+// ResolveParent opens an existing directory for a child mutation. Unlike
+// Resolve(..., true), an allowed volume root is valid here because the root
+// itself is not being renamed or deleted.
+func (g Guard) ResolveParent(client string) (*Resolved, error) {
+	if err := lexical(client); err != nil {
+		return nil, err
+	}
+	r, err := resolveOpen(client, true)
+	if err != nil {
+		return nil, fmt.Errorf("resolve parent: %w", err)
+	}
+	if _, err := g.authorizeParent(r.path); err != nil {
+		_ = r.Close()
+		return nil, err
+	}
+	return r, nil
+}
+
 func (g Guard) Check(client string, write bool) (string, error) {
 	r, err := g.Resolve(client, write)
 	if err != nil {
@@ -116,6 +134,10 @@ func (g Guard) CheckTransfer(source, destination string) (string, string, error)
 }
 
 func (g Guard) authorize(path string, write bool) (string, error) {
+	return g.authorizeWithRoot(path, write, false)
+}
+
+func (g Guard) authorizeParent(path string) (string, error) {
 	p := filepath.Clean(path)
 	root := ""
 	for _, candidate := range g.Roots {
@@ -131,7 +153,35 @@ func (g Guard) authorize(path string, write bool) (string, error) {
 	if root == "" {
 		return "", ErrOutside
 	}
-	if write && samePath(p, root) {
+	for _, protected := range g.Protected {
+		canonical, err := resolve(protected)
+		if err != nil {
+			return "", fmt.Errorf("resolve protected zone: %w", err)
+		}
+		if within(p, canonical) {
+			return "", ErrProtected
+		}
+	}
+	return p, nil
+}
+
+func (g Guard) authorizeWithRoot(path string, write, allowRoot bool) (string, error) {
+	p := filepath.Clean(path)
+	root := ""
+	for _, candidate := range g.Roots {
+		canonical, err := resolve(candidate)
+		if err != nil {
+			return "", fmt.Errorf("resolve allowed root: %w", err)
+		}
+		if within(p, canonical) {
+			root = canonical
+			break
+		}
+	}
+	if root == "" {
+		return "", ErrOutside
+	}
+	if write && !allowRoot && samePath(p, root) {
 		return "", ErrRoot
 	}
 	if write {

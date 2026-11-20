@@ -1,0 +1,84 @@
+// SPDX-License-Identifier: Apache-2.0
+//go:build windows
+
+package files
+
+import (
+	"fmt"
+	"os"
+	"runtime"
+	"unsafe"
+
+	"github.com/danielrigobertojs/lanbay/internal/pathguard"
+	"golang.org/x/sys/windows"
+)
+
+type fileRenameInformationEx struct {
+	Flags          uint32
+	RootDirectory  windows.Handle
+	FileNameLength uint32
+	FileName       [1]uint16
+}
+
+func mkdirAt(parent *pathguard.Resolved, name string, _ os.FileMode) error {
+	objectName, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return err
+	}
+	h, err := fileHandle(parent)
+	if err != nil {
+		return err
+	}
+	oa := &windows.OBJECT_ATTRIBUTES{
+		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+		RootDirectory: h,
+		ObjectName:    objectName,
+		Attributes:    windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+	}
+	var created windows.Handle
+	var status windows.IO_STATUS_BLOCK
+	err = windows.NtCreateFile(&created, windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE, oa, &status, nil, windows.FILE_ATTRIBUTE_DIRECTORY,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, windows.FILE_CREATE,
+		windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+	if err != nil {
+		return err
+	}
+	return windows.CloseHandle(created)
+}
+
+func renameAt(source, parent *pathguard.Resolved, name string) error {
+	sourceHandle, err := fileHandle(source)
+	if err != nil {
+		return err
+	}
+	parentHandle, err := fileHandle(parent)
+	if err != nil {
+		return err
+	}
+	name16, err := windows.UTF16FromString(name)
+	if err != nil {
+		return err
+	}
+	nameBytes := (len(name16) - 1) * 2
+	var header fileRenameInformationEx
+	size := int(unsafe.Offsetof(header.FileName)) + nameBytes
+	buf := make([]byte, size)
+	info := (*fileRenameInformationEx)(unsafe.Pointer(&buf[0]))
+	info.RootDirectory = parentHandle
+	info.FileNameLength = uint32(nameBytes)
+	copy((*[windows.MAX_LONG_PATH]uint16)(unsafe.Pointer(&info.FileName[0]))[:len(name16)-1], name16[:len(name16)-1])
+	if err := windows.SetFileInformationByHandle(sourceHandle, windows.FileRenameInfoEx, &buf[0], uint32(len(buf))); err != nil {
+		return fmt.Errorf("rename by handle: %w", err)
+	}
+	return nil
+}
+
+func fileHandle(resolved *pathguard.Resolved) (windows.Handle, error) {
+	if resolved == nil || resolved.File() == nil {
+		return 0, fmt.Errorf("closed resolved handle")
+	}
+	file := resolved.File()
+	h := windows.Handle(file.Fd())
+	runtime.KeepAlive(file)
+	return h, nil
+}

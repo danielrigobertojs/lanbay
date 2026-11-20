@@ -126,7 +126,12 @@ func (m Manager) Mkdir(ctx context.Context, parent, name string) (string, error)
 	if err != nil {
 		return "", err
 	}
-	return p, os.Mkdir(p, 0750)
+	r, err := m.Guard.ResolveParent(parent)
+	if err != nil {
+		return "", err
+	}
+	defer r.Close()
+	return p, mkdirAt(r, name, 0750)
 }
 func (m Manager) Rename(ctx context.Context, source string, args ...string) (string, error) {
 	if len(args) < 1 || len(args) > 2 {
@@ -139,7 +144,7 @@ func (m Manager) Rename(ctx context.Context, source string, args ...string) (str
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	src, err := m.Guard.Check(source, true)
+	src, err := m.Guard.Resolve(source, true)
 	if err != nil {
 		return "", err
 	}
@@ -147,21 +152,33 @@ func (m Manager) Rename(ctx context.Context, source string, args ...string) (str
 	if err != nil {
 		return "", err
 	}
-	return dst, os.Rename(src, dst)
+	dstParent, err := m.Guard.ResolveParent(parent)
+	if err != nil {
+		return "", err
+	}
+	defer src.Close()
+	defer dstParent.Close()
+	return dst, renameAt(src, dstParent, name)
 }
 func (m Manager) Move(ctx context.Context, source, parent, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	src, err := m.Guard.Check(source, true)
+	src, err := m.Guard.Resolve(source, true)
 	if err != nil {
 		return err
 	}
-	dst, err := m.Guard.CheckNew(parent, name, true)
+	_, err = m.Guard.CheckNew(parent, name, true)
 	if err != nil {
 		return err
 	}
-	return os.Rename(src, dst)
+	dstParent, err := m.Guard.ResolveParent(parent)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	defer dstParent.Close()
+	return renameAt(src, dstParent, name)
 }
 func (m Manager) Copy(ctx context.Context, source, parent, name string) error {
 	src, err := m.Guard.Check(source, false)
