@@ -15,7 +15,7 @@ func init() { _ = runCommand }
 
 func runCommand(ctx context.Context, path string, args []string, env []string, dir string, out io.Writer) (int, []byte, error) {
 	var buf bytes.Buffer
-	w := io.MultiWriter(out, &buf)
+	w := io.MultiWriter(out, &cappedWriter{buf: &buf, cap: 1 << 20})
 	cmd := exec.Command(path, args...)
 	cmd.Stdout = w
 	cmd.Stderr = w
@@ -43,11 +43,25 @@ func runCommand(ctx context.Context, path string, args []string, env []string, d
 		err = ctx.Err()
 		code = -1
 	}
-	if err != nil && code != -1 {
-		// process ran but failed to wait? keep code 0
-	}
 	if err != nil {
 		return code, buf.Bytes(), err
 	}
 	return code, buf.Bytes(), nil
+}
+
+type cappedWriter struct {
+	buf *bytes.Buffer
+	cap int
+}
+
+func (c *cappedWriter) Write(p []byte) (int, error) {
+	if c.buf.Len() < c.cap {
+		remaining := c.cap - c.buf.Len()
+		if len(p) > remaining {
+			c.buf.Write(p[:remaining])
+		} else {
+			c.buf.Write(p)
+		}
+	}
+	return len(p), nil
 }
