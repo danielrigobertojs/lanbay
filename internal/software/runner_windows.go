@@ -10,6 +10,7 @@ import (
 	"io"
 	"os/exec"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -38,10 +39,12 @@ func runCommand(ctx context.Context, path string, args []string, env []string, d
 		_ = cmd.Process.Kill()
 		return 0, buf.Bytes(), fmt.Errorf("assign job object: %w", err)
 	}
-	// Resume the suspended process now that it is in the job.
-	if p, err := windows.OpenProcess(windows.PROCESS_SUSPEND_RESUME, false, uint32(cmd.Process.Pid)); err == nil {
-		windows.ResumeThread(p)
-		windows.CloseHandle(p)
+	// Resume the suspended primary thread(s) now that the process is in the job.
+	resumed := resumeProcessThreads(uint32(cmd.Process.Pid))
+	if !resumed {
+		job.close()
+		_ = cmd.Process.Kill()
+		return 0, buf.Bytes(), fmt.Errorf("no se pudo reanudar el proceso")
 	}
 
 	done := make(chan error, 1)
@@ -67,6 +70,34 @@ func runCommand(ctx context.Context, path string, args []string, env []string, d
 		job.close()
 		return -1, buf.Bytes(), ctx.Err()
 	}
+}
+
+func resumeProcessThreads(pid uint32) bool {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(snapshot)
+	var entry windows.ThreadEntry32
+	entry.Size = uint32(unsafe.Sizeof(entry))
+	if err := windows.Thread32First(snapshot, &entry); err != nil {
+		return false
+	}
+	resumed := false
+	for {
+		if entry.OwnerProcessID == pid {
+			if h, err := windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, entry.ThreadID); err == nil {
+				if n, err := windows.ResumeThread(h); err == nil && n != uint32(0xFFFFFFFF) {
+					resumed = true
+				}
+				windows.CloseHandle(h)
+			}
+		}
+		if err := windows.Thread32Next(snapshot, &entry); err != nil {
+			break
+		}
+	}
+	return resumed
 }
 
 type cappedWriter struct {

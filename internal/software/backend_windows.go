@@ -27,14 +27,19 @@ type wingetBackend struct {
 	avail    bool
 	reason   string
 	tempRoot string
+	dataDir  string
 }
 
-func newBackend() Backend {
-	tempRoot := filepath.Join(os.Getenv("ProgramData"), "Lanbay", "tmp")
-	if os.Getenv("ProgramData") == "" {
+func newBackendWithDataDir(dataDir string) Backend {
+	tempRoot := ""
+	if dataDir != "" {
+		tempRoot = filepath.Join(dataDir, "tmp")
+	} else if pd := os.Getenv("ProgramData"); pd != "" {
+		tempRoot = filepath.Join(pd, "Lanbay", "tmp")
+	} else {
 		tempRoot = filepath.Join(os.TempDir(), "Lanbay", "tmp")
 	}
-	b := &wingetBackend{tempRoot: tempRoot}
+	b := &wingetBackend{tempRoot: tempRoot, dataDir: dataDir}
 	b.detect()
 	return b
 }
@@ -80,7 +85,9 @@ func resolveWingetPath() (string, error) {
 	if err != nil || len(matches) == 0 {
 		return "", errors.New("no se encontró winget.exe real en WindowsApps")
 	}
-	sort.Strings(matches)
+	sort.Slice(matches, func(i, j int) bool {
+		return versionLess(matches[i], matches[j])
+	})
 	real := matches[len(matches)-1]
 	root := filepath.Join(programFiles, "WindowsApps")
 	rel, err := filepath.Rel(root, real)
@@ -137,6 +144,61 @@ func readAppExecLink(path string) (uint32, string, error) {
 	return tag, pkg, nil
 }
 
+func versionLess(a, b string) bool {
+	// Extract a version-like token from the path and compare numerically.
+	va := versionToken(a)
+	vb := versionToken(b)
+	pa := splitVersion(va)
+	pb := splitVersion(vb)
+	n := len(pa)
+	if len(pb) > n {
+		n = len(pb)
+	}
+	for i := 0; i < n; i++ {
+		var x, y int
+		if i < len(pa) {
+			x = atoi(pa[i])
+		}
+		if i < len(pb) {
+			y = atoi(pb[i])
+		}
+		if x != y {
+			return x < y
+		}
+	}
+	return a < b
+}
+
+func versionToken(p string) string {
+	// find Microsoft.DesktopAppInstaller_<ver>_8wekyb3d8bbwe
+	for _, part := range strings.Split(p, string(os.PathSeparator)) {
+		if strings.HasPrefix(part, "Microsoft.DesktopAppInstaller_") {
+			fields := strings.Split(part, "_")
+			if len(fields) >= 2 {
+				return fields[1]
+			}
+		}
+	}
+	return p
+}
+
+func splitVersion(v string) []string {
+	return strings.FieldsFunc(v, func(r rune) bool {
+		return r == '.' || r == '-' || r == '+'
+	})
+}
+
+func atoi(s string) int {
+	n := 0
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			break
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n
+}
+
 func checkTrustedInstallerOwner(path string) error {
 	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {
@@ -190,26 +252,10 @@ func (b *wingetBackend) IsInstalled(ctx context.Context, id string) (bool, error
 	}
 	defer os.RemoveAll(jobTemp)
 	code, out, err := runCommand(ctx, b.path, []string{"list", "--id", id, "--exact"}, b.env(jobTemp), jobTemp, io.Discard)
-	const notInstalledCode = 0x8A150014
-	if code == notInstalledCode {
-		return false, nil
+	if err != nil {
+		return false, err
 	}
-	if err != nil && code == 0 {
-		// ignore
-	}
-	if code != 0 {
-		return false, fmt.Errorf("winget list exited 0x%X", code)
-	}
-	res, perr := ParseInstalledList(string(out))
-	if perr != nil {
-		return false, perr
-	}
-	for _, r := range res {
-		if r.ID == id {
-			return true, nil
-		}
-	}
-	return false, fmt.Errorf("winget list did not report an exact match")
+	return DecideInstalled(code, string(out), id)
 }
 
 func (b *wingetBackend) Install(ctx context.Context, id string, out io.Writer) (int, error) {

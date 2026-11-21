@@ -54,7 +54,7 @@ func main() {
 	}
 	defer db.Close()
 	app := server.New(c, db, volumes.NewProvider(), version)
-	sw, err := software.NewService(db, software.NewBackend(), app.Jobs(), c.DataDir)
+	sw, err := software.NewService(db, software.NewBackendWithDataDir(c.DataDir), app.Jobs(), c.DataDir)
 	if err != nil {
 		fatal(err)
 	}

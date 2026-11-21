@@ -48,6 +48,27 @@ func validateSearchQuery(q string) error {
 	return nil
 }
 
+// DecideInstalled interprets winget list output per S4.
+func DecideInstalled(code int, out string, id string) (bool, error) {
+	const notInstalledCode = 0x8A150014
+	if code == notInstalledCode {
+		return false, nil
+	}
+	if code != 0 {
+		return false, fmt.Errorf("winget list exited 0x%X", code)
+	}
+	res, err := ParseInstalledList(out)
+	if err != nil {
+		return false, err
+	}
+	for _, r := range res {
+		if r.ID == id {
+			return true, nil
+		}
+	}
+	return false, fmt.Errorf("winget list did not report an exact match")
+}
+
 func NewService(db *sql.DB, backend Backend, jm *jobs.Manager, dataDir string) (*Service, error) {
 	if err := EnsureSchema(context.Background(), db); err != nil {
 		return nil, err

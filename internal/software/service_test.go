@@ -30,6 +30,30 @@ func TestValidateWingetID(t *testing.T) {
 	}
 }
 
+func TestDecideInstalled(t *testing.T) {
+	// not installed code
+	ok, err := DecideInstalled(0x8A150014, "", "7zip.7zip")
+	if ok || err != nil {
+		t.Fatalf("expected false,nil got %v,%v", ok, err)
+	}
+	// code 0 exact match
+	out := "Name  Id        Version  Source\n----  --        -------  ------\n7-Zip 7zip.7zip 24.00   winget\n"
+	ok, err = DecideInstalled(0, out, "7zip.7zip")
+	if !ok || err != nil {
+		t.Fatalf("expected true,nil got %v,%v", ok, err)
+	}
+	// empty table with code 0 -> reject
+	ok, err = DecideInstalled(0, "Name  Id  Version  Source\n----  --  -------  ------\n", "7zip.7zip")
+	if ok || err == nil {
+		t.Fatalf("expected reject got %v,%v", ok, err)
+	}
+	// unknown code -> reject
+	ok, err = DecideInstalled(1, out, "7zip.7zip")
+	if ok || err == nil {
+		t.Fatalf("expected reject got %v,%v", ok, err)
+	}
+}
+
 func TestValidateSearchQuery(t *testing.T) {
 	if err := validateSearchQuery("7zip"); err != nil {
 		t.Fatal(err)
