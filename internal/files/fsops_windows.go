@@ -69,12 +69,14 @@ func renameAt(source, parent *pathguard.Resolved, name string) error {
 	info.RootDirectory = parentHandle
 	info.FileNameLength = uint32(nameBytes)
 	copy((*[windows.MAX_LONG_PATH]uint16)(unsafe.Pointer(&info.FileName[0]))[:len(name16)-1], name16[:len(name16)-1])
-	err = windows.SetFileInformationByHandle(sourceHandle, windows.FileRenameInfoEx, &buf[0], uint32(len(buf)))
-	if exUnsupported(err) {
-		// FAT-family filesystems do not support FileRenameInfoEx. The legacy
-		// information class retains the same RootDirectory handle, so it does
-		// not reopen an untrusted destination path.
-		err = windows.SetFileInformationByHandle(sourceHandle, windows.FileRenameInfo, &buf[0], uint32(len(buf)))
+
+	var iosb windows.IO_STATUS_BLOCK
+	// NtSetInformationFile keeps RootDirectory (handle del padre validado) sin
+	// reabrir la ruta absoluta. SetFileInformationByHandle rechaza
+	// RootDirectory != NULL ("The parameter is incorrect").
+	err = windows.NtSetInformationFile(sourceHandle, &iosb, &buf[0], uint32(len(buf)), 65) // FileRenameInformationEx
+	if err == windows.STATUS_INVALID_INFO_CLASS || err == windows.STATUS_NOT_SUPPORTED {
+		err = windows.NtSetInformationFile(sourceHandle, &iosb, &buf[0], uint32(len(buf)), 10) // FileRenameInformation
 	}
 	if err != nil {
 		return fmt.Errorf("rename by handle: %w", err)

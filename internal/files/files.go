@@ -69,9 +69,19 @@ func (m Manager) List(ctx context.Context, client string, opt ListOptions) (List
 	}
 	defer r.Close()
 	p := r.Path()
-	dirs, err := r.File().ReadDir(-1)
-	if err != nil {
-		return Listing{}, fmt.Errorf("read directory: %w", err)
+	var dirs []os.DirEntry
+	for {
+		batch, err := r.File().ReadDir(256)
+		dirs = append(dirs, batch...)
+		if err != nil {
+			if err != io.EOF {
+				return Listing{}, fmt.Errorf("read directory: %w", err)
+			}
+			break
+		}
+		if len(batch) == 0 {
+			break
+		}
 	}
 	items := make([]Entry, 0, len(dirs))
 	for _, d := range dirs {
@@ -237,9 +247,21 @@ func (m Manager) Delete(ctx context.Context, source string, options DeleteOption
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	r, err := m.Guard.ResolveWalk(source, true)
+	r, err := m.Guard.Resolve(source, true)
 	if err != nil {
 		return err
+	}
+	info, err := r.File().Stat()
+	if err != nil {
+		_ = r.Close()
+		return err
+	}
+	if info.IsDir() {
+		_ = r.Close()
+		r, err = m.Guard.ResolveWalk(source, true)
+		if err != nil {
+			return err
+		}
 	}
 	defer r.Close()
 	if !options.Permanent {
@@ -284,16 +306,46 @@ func (m Manager) Zip(ctx context.Context, client string, out io.Writer) error {
 		return err
 	}
 	z := zip.NewWriter(out)
-	defer z.Close()
 	if info.IsDir() {
-		return zipTree(ctx, z, r, filepath.Base(r.Path()), 0, newWalkCount())
+		omitted, err := zipTree(ctx, z, r, filepath.Base(r.Path()), 0, newWalkCount())
+		if err != nil {
+			_ = z.Close()
+			return err
+		}
+		if len(omitted) > 0 {
+			comment := "Lanbay: omitted reparse points: " + strings.Join(omitted, ", ")
+			if len(comment) > 65535 {
+				// ZIP comment max 65535 bytes.
+				truncated := []string{}
+				size := len("Lanbay: omitted reparse points: ")
+				for _, item := range omitted {
+					if size+len(item)+2 > 65500 {
+						truncated = append(truncated, fmt.Sprintf("y %d más", len(omitted)-len(truncated)))
+						break
+					}
+					truncated = append(truncated, item)
+					size += len(item) + 2
+				}
+				comment = "Lanbay: omitted reparse points: " + strings.Join(truncated, ", ")
+			}
+			z.SetComment(comment)
+		}
+		if err := z.Close(); err != nil {
+			return err
+		}
+		return nil
 	}
 	w, err := z.Create(filepath.Base(r.Path()))
 	if err != nil {
+		_ = z.Close()
 		return err
 	}
 	_, err = io.Copy(w, r.File())
-	return err
+	closeErr := z.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
 }
 
 type walkCount struct{ entries int }
@@ -336,51 +388,60 @@ func child(ctx context.Context, dir *pathguard.Resolved, name string, write bool
 }
 
 func copyTree(ctx context.Context, source, destination *pathguard.Resolved, depth int, count *walkCount) error {
-	entries, err := source.File().ReadDir(-1)
-	if err != nil {
-		return fmt.Errorf("read source directory: %w", err)
-	}
-	for _, entry := range entries {
-		src, info, err := child(ctx, source, entry.Name(), false, depth+1, count)
-		if err != nil {
-			return err
-		}
-		if src.Reparse() {
-			slog.Warn("omitting reparse point from copy", "path", src.Path())
-			_ = src.Close()
-			continue
-		}
-		if info.IsDir() {
-			_ = src.Close()
-			src, err = pathguard.OpenChild(source, entry.Name(), false, true)
+	for {
+		entries, err := source.File().ReadDir(256)
+		for _, entry := range entries {
+			src, info, err := child(ctx, source, entry.Name(), false, depth+1, count)
 			if err != nil {
 				return err
 			}
 			if src.Reparse() {
+				slog.Warn("omitting reparse point from copy", "path", src.Path())
 				_ = src.Close()
 				continue
 			}
-			if err = mkdirAt(destination, entry.Name(), info.Mode()); err != nil {
+			if info.IsDir() {
 				_ = src.Close()
-				return err
-			}
-			dst, err := pathguard.OpenChild(destination, entry.Name(), false, true)
-			if err != nil {
+				src, err = pathguard.OpenChild(source, entry.Name(), false, true)
+				if err != nil {
+					return err
+				}
+				if src.Reparse() {
+					slog.Warn("omitting reparse point from copy", "path", src.Path())
+					_ = src.Close()
+					continue
+				}
+				if err = mkdirAt(destination, entry.Name(), info.Mode()); err != nil {
+					_ = src.Close()
+					return err
+				}
+				dst, err := pathguard.OpenChild(destination, entry.Name(), false, true)
+				if err != nil {
+					_ = src.Close()
+					return err
+				}
+				err = copyTree(ctx, src, dst, depth+1, count)
+				_ = dst.Close()
 				_ = src.Close()
-				return err
+				if err != nil {
+					return err
+				}
+				continue
 			}
-			err = copyTree(ctx, src, dst, depth+1, count)
-			_ = dst.Close()
+			err = copyFileAt(src, destination, entry.Name(), info.Mode())
 			_ = src.Close()
 			if err != nil {
 				return err
 			}
-			continue
 		}
-		err = copyFileAt(src, destination, entry.Name(), info.Mode())
-		_ = src.Close()
 		if err != nil {
-			return err
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("read source directory: %w", err)
+		}
+		if len(entries) == 0 {
+			break
 		}
 	}
 	return nil
@@ -400,26 +461,10 @@ func deleteTree(ctx context.Context, node *pathguard.Resolved, depth int, count 
 	if !info.IsDir() {
 		return deleteAt(node)
 	}
-	entries, err := node.File().ReadDir(-1)
-	if err != nil {
-		return fmt.Errorf("read directory for delete: %w", err)
-	}
-	for _, entry := range entries {
-		childNode, childInfo, err := child(ctx, node, entry.Name(), true, depth+1, count)
-		if err != nil {
-			return err
-		}
-		if childNode.Reparse() {
-			err = deleteAt(childNode)
-			_ = childNode.Close()
-			if err != nil {
-				return err
-			}
-			continue
-		}
-		if childInfo.IsDir() {
-			_ = childNode.Close()
-			childNode, err = pathguard.OpenChild(node, entry.Name(), true, true)
+	for {
+		entries, err := node.File().ReadDir(256)
+		for _, entry := range entries {
+			childNode, childInfo, err := child(ctx, node, entry.Name(), true, depth+1, count)
 			if err != nil {
 				return err
 			}
@@ -431,59 +476,96 @@ func deleteTree(ctx context.Context, node *pathguard.Resolved, depth int, count 
 				}
 				continue
 			}
+			if childInfo.IsDir() {
+				_ = childNode.Close()
+				childNode, err = pathguard.OpenChild(node, entry.Name(), true, true)
+				if err != nil {
+					return err
+				}
+				if childNode.Reparse() {
+					err = deleteAt(childNode)
+					_ = childNode.Close()
+					if err != nil {
+						return err
+					}
+					continue
+				}
+			}
+			err = deleteTree(ctx, childNode, depth+1, count)
+			_ = childNode.Close()
+			if err != nil {
+				return err
+			}
 		}
-		err = deleteTree(ctx, childNode, depth+1, count)
-		_ = childNode.Close()
 		if err != nil {
-			return err
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("read directory for delete: %w", err)
+		}
+		if len(entries) == 0 {
+			break
 		}
 	}
 	return deleteAt(node)
 }
 
-func zipTree(ctx context.Context, z *zip.Writer, dir *pathguard.Resolved, prefix string, depth int, count *walkCount) error {
-	entries, err := dir.File().ReadDir(-1)
-	if err != nil {
-		return fmt.Errorf("read directory for zip: %w", err)
-	}
-	for _, entry := range entries {
-		node, info, err := child(ctx, dir, entry.Name(), false, depth+1, count)
-		if err != nil {
-			return err
-		}
-		name := filepath.ToSlash(filepath.Join(prefix, entry.Name()))
-		if node.Reparse() {
-			slog.Warn("omitting reparse point from zip", "path", node.Path())
-			_ = node.Close()
-			continue
-		}
-		if info.IsDir() {
-			_ = node.Close()
-			node, err = pathguard.OpenChild(dir, entry.Name(), false, true)
+func zipTree(ctx context.Context, z *zip.Writer, dir *pathguard.Resolved, prefix string, depth int, count *walkCount) ([]string, error) {
+	var omitted []string
+	for {
+		entries, err := dir.File().ReadDir(256)
+		for _, entry := range entries {
+			node, info, err := child(ctx, dir, entry.Name(), false, depth+1, count)
 			if err != nil {
-				return err
+				return omitted, err
 			}
+			name := filepath.ToSlash(filepath.Join(prefix, entry.Name()))
 			if node.Reparse() {
+				slog.Warn("omitting reparse point from zip", "path", node.Path())
+				omitted = append(omitted, name)
 				_ = node.Close()
 				continue
 			}
-			err = zipTree(ctx, z, node, name, depth+1, count)
+			if info.IsDir() {
+				_ = node.Close()
+				node, err = pathguard.OpenChild(dir, entry.Name(), false, true)
+				if err != nil {
+					return omitted, err
+				}
+				if node.Reparse() {
+					slog.Warn("omitting reparse point from zip", "path", node.Path())
+					omitted = append(omitted, name)
+					_ = node.Close()
+					continue
+				}
+				childOmitted, err := zipTree(ctx, z, node, name, depth+1, count)
+				omitted = append(omitted, childOmitted...)
+				_ = node.Close()
+				if err != nil {
+					return omitted, err
+				}
+				continue
+			}
+			w, err := z.Create(name)
+			if err == nil {
+				_, err = io.Copy(w, node.File())
+			}
 			_ = node.Close()
 			if err != nil {
-				return err
+				return omitted, err
 			}
-			continue
 		}
-		w, err := z.Create(name)
-		if err == nil {
-			_, err = io.Copy(w, node.File())
-		}
-		_ = node.Close()
 		if err != nil {
-			return err
+			if err == io.EOF {
+				break
+			}
+			return omitted, fmt.Errorf("read directory for zip: %w", err)
+		}
+		if len(entries) == 0 {
+			break
 		}
 	}
-	return nil
+	return omitted, nil
 }
 
 func isWithin(path, parent string) bool {
