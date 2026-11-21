@@ -96,6 +96,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/software", s.softwareList)
 	mux.HandleFunc("GET /api/v1/software/search", s.softwareSearch)
 	mux.HandleFunc("POST /api/v1/software/install", s.softwareInstall)
+	mux.HandleFunc("POST /api/v1/software/install-uploaded", s.softwareInstallUploaded)
+	mux.HandleFunc("GET /api/v1/software/installers/inspect", s.softwareInspectInstaller)
+	mux.HandleFunc("GET /api/v1/software/installers/pending/{job}", s.softwarePendingChoices)
+	mux.HandleFunc("POST /api/v1/software/installers/confirm", s.softwareConfirmInstalled)
 	mux.HandleFunc("GET /api/v1/software/updates", s.softwareUpdates)
 	mux.HandleFunc("POST /api/v1/software/{id}/upgrade", s.softwareUpgrade)
 	mux.HandleFunc("POST /api/v1/software/{id}/uninstall", s.softwareUninstall)
@@ -753,6 +757,89 @@ func (s *Server) softwareUninstall(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]string{"job_id": jobID})
 }
+func (s *Server) softwareInstallUploaded(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, true) {
+		return
+	}
+	if s.software == nil {
+		http.Error(w, "software no disponible", http.StatusServiceUnavailable)
+		return
+	}
+	var in struct {
+		Path        string   `json:"path"`
+		Preset      string   `json:"preset"`
+		Args        []string `json:"args"`
+		Interactive bool     `json:"interactive"`
+		Keep        bool     `json:"keep_installer"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, "solicitud inválida", 400)
+		return
+	}
+	jobID, err := s.software.InstallUploaded(r.Context(), software.InstallUploadOptions{
+		Path: in.Path, Preset: in.Preset, Args: in.Args, Interactive: in.Interactive, KeepInstaller: in.Keep,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]string{"job_id": jobID})
+}
+
+func (s *Server) softwareInspectInstaller(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, false) {
+		return
+	}
+	if s.software == nil {
+		http.Error(w, "software no disponible", http.StatusServiceUnavailable)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	info, err := s.software.InspectInstaller(path)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(info)
+}
+
+func (s *Server) softwarePendingChoices(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, false) {
+		return
+	}
+	if s.software == nil {
+		http.Error(w, "software no disponible", http.StatusServiceUnavailable)
+		return
+	}
+	job := r.PathValue("job")
+	_ = json.NewEncoder(w).Encode(map[string]any{"choices": s.software.PendingInstallChoices(job)})
+}
+
+func (s *Server) softwareConfirmInstalled(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, true) {
+		return
+	}
+	if s.software == nil {
+		http.Error(w, "software no disponible", http.StatusServiceUnavailable)
+		return
+	}
+	var in struct {
+		Job  string   `json:"job_id"`
+		Keys []string `json:"keys"`
+		Keep bool     `json:"keep_installer"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, "solicitud inválida", 400)
+		return
+	}
+	if err := s.software.ConfirmInstalled(r.Context(), in.Job, in.Keys, in.Keep); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) audit(r *http.Request, action, result string) {
 	// SQLite accepts one writer at a time. Audit records are security evidence,
 	// so concurrent requests must not silently lose one to a busy writer.
