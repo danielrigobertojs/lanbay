@@ -16,6 +16,11 @@ import (
 	"github.com/danielrigobertojs/lanbay/internal/jobs"
 )
 
+type pendingInstall struct {
+	entries []UninstallEntry
+	path    string
+}
+
 type Service struct {
 	db       *sql.DB
 	Registry *Registry
@@ -28,7 +33,7 @@ type Service struct {
 	installMu      sync.Mutex
 
 	pendingMu      sync.Mutex
-	pendingChoices map[string][]UninstallEntry
+	pendingChoices map[string]pendingInstall
 }
 
 var wingetIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
@@ -83,7 +88,11 @@ func NewService(db *sql.DB, backend Backend, jm *jobs.Manager, dataDir string) (
 	if err := EnsureSchema(context.Background(), db); err != nil {
 		return nil, err
 	}
-	return &Service{db: db, Registry: NewRegistry(db), Backend: backend, Jobs: jm, DataDir: dataDir, pendingChoices: map[string][]UninstallEntry{}}, nil
+	svc := &Service{db: db, Registry: NewRegistry(db), Backend: backend, Jobs: jm, DataDir: dataDir, pendingChoices: map[string]pendingInstall{}}
+	if err := os.MkdirAll(svc.StagingDir(), 0700); err != nil {
+		return nil, fmt.Errorf("create staging dir: %w", err)
+	}
+	return svc, nil
 }
 
 func (s *Service) RestartPending() bool {
@@ -361,24 +370,31 @@ func (w *jobLogWriter) Write(p []byte) (int, error) {
 }
 
 func (s *Service) StagingDir() string {
-	return filepath.Join(s.DataDir, "staging")
+	dir := filepath.Join(s.DataDir, "staging")
+	_ = os.MkdirAll(dir, 0700)
+	return dir
 }
 
 func (s *Service) InspectInstaller(path string) (InstallerInfo, error) {
-	return InspectInstaller(path)
+	safe, err := ResolveStagingPath(s.StagingDir(), path)
+	if err != nil {
+		return InstallerInfo{}, err
+	}
+	return InspectInstaller(safe)
 }
 
 func (s *Service) PendingInstallChoices(jobID string) []UninstallEntry {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
-	out := make([]UninstallEntry, len(s.pendingChoices[jobID]))
-	copy(out, s.pendingChoices[jobID])
+	out := make([]UninstallEntry, len(s.pendingChoices[jobID].entries))
+	copy(out, s.pendingChoices[jobID].entries)
 	return out
 }
 
 func (s *Service) ConfirmInstalled(ctx context.Context, jobID string, chosen []string, keep bool) error {
 	s.pendingMu.Lock()
-	choices := s.pendingChoices[jobID]
+	pending := s.pendingChoices[jobID]
+	choices := pending.entries
 	delete(s.pendingChoices, jobID)
 	s.pendingMu.Unlock()
 	allowed := map[string]bool{}
@@ -408,6 +424,9 @@ func (s *Service) ConfirmInstalled(ctx context.Context, jobID string, chosen []s
 	if len(b) > 0 {
 		uninstallInfo = string(b)
 	}
+	if !keep && pending.path != "" {
+		_ = os.Remove(pending.path)
+	}
 	return s.Registry.Add(ctx, ManagedApp{
 		ID:            id,
 		Source:        SourceUpload,
@@ -432,6 +451,11 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 	if opts.Path == "" {
 		return "", fmt.Errorf("path requerido")
 	}
+	safe, err := ResolveStagingPath(s.StagingDir(), opts.Path)
+	if err != nil {
+		return "", err
+	}
+	opts.Path = safe
 	if _, err := os.Stat(opts.Path); err != nil {
 		return "", err
 	}
@@ -496,7 +520,7 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 			})
 		} else if len(diff) > 1 {
 			s.pendingMu.Lock()
-			s.pendingChoices[j.ID] = diff
+			s.pendingChoices[j.ID] = pendingInstall{entries: diff, path: opts.Path}
 			s.pendingMu.Unlock()
 			_, _ = s.Jobs.Update(ctx, j.ID, jobs.Completed, -1, "seleccione las entradas instaladas", "")
 			// prevent Start from overwriting message? Start will set completed; okay
@@ -551,7 +575,7 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string) (stri
 				s.setRestartPending()
 			}
 		} else if entry.QuietUninstallString != "" {
-			parts := strings.Fields(entry.QuietUninstallString)
+			parts := splitCommand(entry.QuietUninstallString)
 			if len(parts) == 0 {
 				return fmt.Errorf("quiet uninstall string vacío")
 			}
@@ -565,7 +589,7 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string) (stri
 				return fmt.Errorf("uninstall exited %d", c)
 			}
 		} else if entry.UninstallString != "" {
-			parts := strings.Fields(entry.UninstallString)
+			parts := splitCommand(entry.UninstallString)
 			if len(parts) == 0 {
 				return fmt.Errorf("uninstall string vacío")
 			}
@@ -593,4 +617,30 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string) (stri
 		return s.Registry.UpdateStatus(ctx, managedID, StatusUninstalled)
 	})
 	return j.ID, nil
+}
+
+// splitCommand splits a command line into argv, honouring double-quoted
+// segments with spaces (e.g. "C:\Program Files\x\uninstall.exe" /S).
+func splitCommand(line string) []string {
+	var parts []string
+	var cur strings.Builder
+	inQuote := false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case c == '"':
+			inQuote = !inQuote
+		case (c == ' ' || c == '\t') && !inQuote:
+			if cur.Len() > 0 {
+				parts = append(parts, cur.String())
+				cur.Reset()
+			}
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	if cur.Len() > 0 {
+		parts = append(parts, cur.String())
+	}
+	return parts
 }

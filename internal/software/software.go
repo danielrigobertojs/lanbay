@@ -279,3 +279,44 @@ func installerType(path string) string {
 		return ext
 	}
 }
+
+// ResolveStagingPath validates that a client-supplied path resolves inside the
+// server-controlled staging directory. It accepts either a bare file name or a
+// path already contained in staging. Anything else is rejected.
+func ResolveStagingPath(stagingDir, input string) (string, error) {
+	if strings.TrimSpace(input) == "" {
+		return "", errors.New("path requerido")
+	}
+	stagingAbs, err := filepath.Abs(stagingDir)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(stagingAbs, 0700); err != nil {
+		return "", err
+	}
+	candidate := input
+	if !filepath.IsAbs(candidate) {
+		// A bare file name is resolved against staging; relative traversal is
+		// kept as-is so the containment check below rejects it.
+		if filepath.Base(candidate) == candidate {
+			candidate = filepath.Join(stagingAbs, candidate)
+		}
+	}
+	candAbs, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", err
+	}
+	if info, err := os.Lstat(candAbs); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if resolved, err := filepath.EvalSymlinks(candAbs); err == nil {
+			candAbs = resolved
+		}
+	}
+	rel, err := filepath.Rel(stagingAbs, candAbs)
+	if err != nil {
+		return "", errors.New("path fuera de staging")
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", errors.New("path fuera de staging")
+	}
+	return candAbs, nil
+}
