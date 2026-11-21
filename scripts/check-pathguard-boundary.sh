@@ -21,6 +21,10 @@ while IFS= read -r file; do
 		# handle-based hardening (see internal/files for the reference pattern).
 		internal/uploads/*)
 			;;
+		# internal/software/backend_windows.go: os.MkdirAll/Temp/RemoveAll y windows.CreateFile
+		# solo en resolveWingetPath/readAppExecLink; el resto del paquete no toca disco.
+		internal/software/backend_windows.go)
+			;;
 		internal/config/datadir_unix.go|internal/config/datadir_windows.go|internal/server/server.go|internal/server/tls.go|spikes/*|tools/kitpack/main.go|tools/kitserver/main.go)
 			;;
 		*)

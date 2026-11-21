@@ -3,6 +3,6 @@
 
 package software
 
-func newBackend() Backend {
+func newBackendWithDataDir(string) Backend {
 	return NewDisabledBackend("software deshabilitado en esta plataforma")
 }
