@@ -24,11 +24,13 @@ const (
 )
 
 type wingetBackend struct {
-	path     string
-	avail    bool
-	reason   string
-	tempRoot string
-	dataDir  string
+	path           string
+	avail          bool
+	reason         string
+	tempRoot       string
+	dataDir        string
+	sourceVerified bool
+	sourceCheckErr error
 }
 
 func newBackendWithDataDir(dataDir string) Backend {
@@ -48,6 +50,54 @@ func newBackendWithDataDir(dataDir string) Backend {
 func (b *wingetBackend) Available() bool { return b.avail }
 func (b *wingetBackend) Reason() string  { return b.reason }
 
+// SourceVerified reports whether the SW-3 source check succeeded.
+func (b *wingetBackend) SourceVerified() bool { return b.sourceVerified }
+
+// SourceCheckErr returns the last SW-3 verification error, if any.
+func (b *wingetBackend) SourceCheckErr() error { return b.sourceCheckErr }
+
+// verifySource runs `winget source export` and `winget settings export` and
+// validates them per SW-3. Returns (true, err) when a confirmed violation is
+// detected, (false, err) when the check could not be performed.
+func (b *wingetBackend) verifySource(ctx context.Context) (bool, error) {
+
+	jobTemp, err := b.newJobTemp()
+	if err != nil {
+		return false, fmt.Errorf("temp dir: %w", err)
+	}
+	defer os.RemoveAll(jobTemp)
+
+	// source export
+	sctx, scancel := context.WithTimeout(ctx, 1*time.Minute)
+	defer scancel()
+	_, out, err := runCommand(sctx, b.path, []string{"source", "export", "winget", "--disable-interactivity"}, b.env(jobTemp), jobTemp, io.Discard)
+	if err != nil && len(out) == 0 {
+		return false, fmt.Errorf("winget source export: %w", err)
+	}
+	if err := VerifyWingetSourceExport(string(out)); err != nil {
+		// If winget produced output we could parse, it's a violation.
+		if len(out) > 0 {
+			return true, err
+		}
+		return false, err
+	}
+
+	// settings export
+	stctx, stcancel := context.WithTimeout(ctx, 1*time.Minute)
+	defer stcancel()
+	_, sout, serr := runCommand(stctx, b.path, []string{"settings", "export", "--disable-interactivity"}, b.env(jobTemp), jobTemp, io.Discard)
+	if serr != nil && len(sout) == 0 {
+		// settings export unsupported -> unverifiable, not a violation
+		return false, fmt.Errorf("winget settings export: %w", serr)
+	}
+	if len(sout) > 0 {
+		if err := VerifyWingetSettingsExport(string(sout)); err != nil {
+			return true, err
+		}
+	}
+	return false, nil
+}
+
 func (b *wingetBackend) detect() {
 	path, err := resolveWingetPath()
 	if err != nil {
@@ -56,6 +106,19 @@ func (b *wingetBackend) detect() {
 		return
 	}
 	b.path = path
+	// SW-3: verify the winget source URL and that InstallerHashOverride /
+	// LocalManifestFiles are disabled. Fail closed on a confirmed violation.
+	violation, verr := b.verifySource(context.Background())
+	if verr != nil {
+		b.sourceCheckErr = verr
+		if violation {
+			b.avail = false
+			b.reason = "winget no verificado (SW-3): " + verr.Error()
+			return
+		}
+		// Unverifiable (e.g. older winget): keep available but record.
+	}
+	b.sourceVerified = (verr == nil)
 	b.avail = true
 	b.reason = ""
 }
@@ -242,6 +305,11 @@ func (b *wingetBackend) Search(ctx context.Context, query string) ([]SearchResul
 	if perr != nil {
 		return nil, perr
 	}
+	for _, r := range res {
+		if err := ValidateResultSource(r.Source); err != nil {
+			return nil, err
+		}
+	}
 	return res, nil
 }
 
@@ -328,7 +396,16 @@ func (b *wingetBackend) ListUpgrades(ctx context.Context) ([]Update, error) {
 	if err != nil && len(out) == 0 {
 		return nil, err
 	}
-	return ParseUpgrade(string(out))
+	upd, err := ParseUpgrade(string(out))
+	if err != nil {
+		return nil, err
+	}
+	for _, u := range upd {
+		if err := ValidateResultSource(u.Source); err != nil {
+			return nil, err
+		}
+	}
+	return upd, nil
 }
 
 func (b *wingetBackend) env(tempDir string) []string {
