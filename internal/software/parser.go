@@ -294,7 +294,11 @@ func isSeparator(line string) bool {
 
 func looksLikeHeader(line string) bool {
 	lower := strings.ToLower(line)
-	return strings.Contains(lower, "id") && (strings.Contains(lower, "name") || strings.Contains(lower, "nombre") || strings.Contains(lower, "id"))
+	if !strings.Contains(lower, "id") {
+		return false
+	}
+	return strings.Contains(lower, "name") || strings.Contains(lower, "nombre") ||
+		strings.Contains(lower, "version") || strings.Contains(lower, "versión")
 }
 
 func isFooter(line string) bool {

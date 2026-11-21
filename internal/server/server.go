@@ -627,7 +627,11 @@ func (s *Server) softwareSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	res, err := s.software.Search(r.Context(), q)
 	if err != nil {
-		http.Error(w, err.Error(), 400)
+		code := http.StatusBadRequest
+		if errors.Is(err, software.ErrDisabled) || errors.Is(err, software.ErrUnavailable) {
+			code = http.StatusServiceUnavailable
+		}
+		http.Error(w, err.Error(), code)
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"results": res})
@@ -659,7 +663,11 @@ func (s *Server) softwareInstall(w http.ResponseWriter, r *http.Request) {
 	}
 	jobID, err := s.software.InstallWinget(r.Context(), id)
 	if err != nil {
-		http.Error(w, err.Error(), 400)
+		code := http.StatusBadRequest
+		if errors.Is(err, software.ErrDisabled) || errors.Is(err, software.ErrUnavailable) {
+			code = http.StatusServiceUnavailable
+		}
+		http.Error(w, err.Error(), code)
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
@@ -675,7 +683,11 @@ func (s *Server) softwareUpdates(w http.ResponseWriter, r *http.Request) {
 	}
 	items, err := s.software.Updates(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), 400)
+		code := http.StatusBadRequest
+		if errors.Is(err, software.ErrDisabled) || errors.Is(err, software.ErrUnavailable) {
+			code = http.StatusServiceUnavailable
+		}
+		http.Error(w, err.Error(), code)
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"updates": items})
@@ -691,7 +703,11 @@ func (s *Server) softwareUpgrade(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	jobID, err := s.software.Upgrade(r.Context(), id)
 	if err != nil {
-		http.Error(w, err.Error(), 400)
+		code := http.StatusBadRequest
+		if errors.Is(err, software.ErrDisabled) || errors.Is(err, software.ErrUnavailable) {
+			code = http.StatusServiceUnavailable
+		}
+		http.Error(w, err.Error(), code)
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
@@ -708,7 +724,11 @@ func (s *Server) softwareUninstall(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	jobID, err := s.software.Uninstall(r.Context(), id)
 	if err != nil {
-		http.Error(w, err.Error(), 400)
+		code := http.StatusBadRequest
+		if errors.Is(err, software.ErrDisabled) || errors.Is(err, software.ErrUnavailable) {
+			code = http.StatusServiceUnavailable
+		}
+		http.Error(w, err.Error(), code)
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)

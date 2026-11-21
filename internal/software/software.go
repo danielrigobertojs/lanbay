@@ -165,7 +165,9 @@ func (r *Registry) Get(ctx context.Context, id string) (ManagedApp, error) {
 }
 
 func (r *Registry) Add(ctx context.Context, a ManagedApp) error {
-	_, err := r.db.ExecContext(ctx, "INSERT INTO managed_apps(id,source,display_name,winget_id,version,installed_at,install_job_id,uninstall_info,status) VALUES(?,?,?,?,?,?,?,?,?)",
+	_, err := r.db.ExecContext(ctx, `INSERT INTO managed_apps(id,source,display_name,winget_id,version,installed_at,install_job_id,uninstall_info,status)
+VALUES(?,?,?,?,?,?,?,?,?)
+ON CONFLICT(id) DO UPDATE SET source=excluded.source, display_name=excluded.display_name, winget_id=excluded.winget_id, version=excluded.version, installed_at=excluded.installed_at, install_job_id=excluded.install_job_id, uninstall_info=excluded.uninstall_info, status=excluded.status`,
 		a.ID, a.Source, a.DisplayName, a.WingetID, a.Version, a.InstalledAt, a.InstallJobID, a.UninstallInfo, a.Status)
 	return err
 }
