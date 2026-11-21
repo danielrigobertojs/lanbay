@@ -62,6 +62,9 @@ func DecideInstalled(code int, out string, id string) (bool, error) {
 		return false, err
 	}
 	for _, r := range res {
+		if err := ValidateResultSource(r.Source); err != nil {
+			return false, err
+		}
 		if r.ID == id {
 			return true, nil
 		}

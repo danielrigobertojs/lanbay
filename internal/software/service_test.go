@@ -37,7 +37,7 @@ func TestDecideInstalled(t *testing.T) {
 		t.Fatalf("expected false,nil got %v,%v", ok, err)
 	}
 	// code 0 exact match
-	out := "Name  Id        Version  Source\n----  --        -------  ------\n7-Zip 7zip.7zip 24.00   winget\n"
+	out := "Name  Id        Version  Source\n----  --        -------  ------\n7-Zip 7zip.7zip 24.00    winget\n"
 	ok, err = DecideInstalled(0, out, "7zip.7zip")
 	if !ok || err != nil {
 		t.Fatalf("expected true,nil got %v,%v", ok, err)
