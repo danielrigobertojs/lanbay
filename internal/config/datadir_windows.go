@@ -4,10 +4,12 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -18,6 +20,7 @@ const (
 	fileShareWrite            = 0x00000002
 	fileShareDelete           = 0x00000004
 	openExisting              = 3
+	fileAllAccess             = 0x001F01FF
 )
 
 func DefaultDataDir() string {
@@ -29,19 +32,14 @@ func DefaultDataDir() string {
 }
 
 func ensureDataDir(path string) error {
-	existed := false
-	if _, err := os.Stat(path); err == nil {
-		existed = true
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	if err := os.MkdirAll(path, 0700); err != nil {
+	created, err := createSecureDirectory(path)
+	if err != nil {
 		return err
 	}
 	if err := rejectUnsafeRoot(path); err != nil {
 		return err
 	}
-	if existed {
+	if !created {
 		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
 		if err != nil {
 			return err
@@ -52,6 +50,11 @@ func ensureDataDir(path string) error {
 		}
 		if !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
 			return os.ErrPermission
+		}
+		if secure, err := hasSecureDACL(path); err != nil {
+			return err
+		} else if secure {
+			return nil
 		}
 	}
 	if err := protectPath(path, true); err != nil {
@@ -69,6 +72,28 @@ func ensureDataDir(path string) error {
 		}
 		return protectPath(file, entry.IsDir())
 	})
+}
+
+// createSecureDirectory performs a single create attempt with the final ACL.
+// ERROR_ALREADY_EXISTS means another process won the race; callers must treat
+// that directory as untrusted until its owner has been validated.
+func createSecureDirectory(path string) (bool, error) {
+	pointer, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return false, err
+	}
+	sd, err := windows.SecurityDescriptorFromString("O:BAD:P(A;OICI;GA;;;BA)(A;OICI;GA;;;SY)")
+	if err != nil {
+		return false, err
+	}
+	sa := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
+	if err := windows.CreateDirectory(pointer, &sa); err == nil {
+		return true, nil
+	} else if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+		return false, nil
+	} else {
+		return false, err
+	}
 }
 
 // ProtectFile assigns the same explicit Administrators/SYSTEM-only DACL to a secret file.
@@ -97,26 +122,69 @@ func protectPath(path string, inherit bool) error {
 	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, admins, nil, acl, nil); err != nil {
 		return err
 	}
-	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	secure, err := hasSecureDACL(path)
 	if err != nil {
 		return err
 	}
-	control, _, err := sd.Control()
-	if err != nil {
-		return err
-	}
-	dacl, _, err := sd.DACL()
-	if err != nil {
-		return err
-	}
-	owner, _, err := sd.Owner()
-	if err != nil {
-		return err
-	}
-	if control&windows.SE_DACL_PROTECTED == 0 || dacl == nil || dacl.AceCount != 2 || !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+	if !secure {
 		return os.ErrPermission
 	}
 	return nil
+}
+
+func hasSecureDACL(path string) (bool, error) {
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, err
+	}
+	control, _, err := sd.Control()
+	if err != nil {
+		return false, err
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return false, err
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return false, err
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 || dacl == nil || !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+		return false, nil
+	}
+	type access struct{ effective, inheritOnly bool }
+	admins, system := access{}, access{}
+	for i := uint16(0); i < dacl.AceCount; i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
+			return false, err
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || (ace.Mask != windows.GENERIC_ALL && ace.Mask != fileAllAccess) {
+			return false, nil
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		var entry *access
+		switch {
+		case sid.IsWellKnown(windows.WinBuiltinAdministratorsSid):
+			entry = &admins
+		case sid.IsWellKnown(windows.WinLocalSystemSid):
+			entry = &system
+		default:
+			return false, nil
+		}
+		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+			if entry.inheritOnly {
+				return false, nil
+			}
+			entry.inheritOnly = true
+		} else {
+			if entry.effective {
+				return false, nil
+			}
+			entry.effective = true
+		}
+	}
+	return admins.effective && system.effective, nil
 }
 
 // rejectUnsafeEntry prevents a privileged migration from following a junction,

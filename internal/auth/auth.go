@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"golang.org/x/crypto/argon2"
+	"log/slog"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -29,22 +30,29 @@ const (
 )
 
 type Manager struct {
-	db         *sql.DB
-	idle       time.Duration
-	now        func() time.Time
-	mu         sync.Mutex
-	attempts   map[string]*attempt
-	global     *attempt
-	hashSlots  chan struct{}
-	loginQueue chan struct{}
+	db               *sql.DB
+	idle             time.Duration
+	now              func() time.Time
+	mu               sync.Mutex
+	attempts         map[string]*attempt
+	global           *attempt
+	passwordFailures map[string]*passwordAttempt
+	hashSlots        chan struct{}
+	loginQueue       chan struct{}
 }
 type attempt struct {
 	failures           int
 	last, blockedUntil time.Time
 }
 
+type passwordAttempt struct {
+	failures int
+	inFlight int
+	revoked  bool
+}
+
 func New(db *sql.DB, idle time.Duration) *Manager {
-	return &Manager{db: db, idle: idle, now: time.Now, attempts: map[string]*attempt{}, global: &attempt{}, hashSlots: make(chan struct{}, 2), loginQueue: make(chan struct{}, 16)}
+	return &Manager{db: db, idle: idle, now: time.Now, attempts: map[string]*attempt{}, global: &attempt{}, passwordFailures: map[string]*passwordAttempt{}, hashSlots: make(chan struct{}, 2), loginQueue: make(chan struct{}, 16)}
 }
 func (m *Manager) EnsurePassword(ctx context.Context) (string, error) {
 	var count int
@@ -75,6 +83,51 @@ func (m *Manager) SetPassword(ctx context.Context, password string) error {
 	_, err = m.db.ExecContext(ctx, "INSERT OR REPLACE INTO settings(key,value) VALUES('password_hash',?),('password_change_required','false')", value)
 	return err
 }
+
+// ChangePasswordForSession atomically changes the password only while the
+// authenticated session still exists. It also completes the forced-change
+// state and revokes every other session.
+func (m *Manager) ChangePasswordForSession(ctx context.Context, id, password string) (bool, error) {
+	if !ValidPassword(password) {
+		return false, errors.New("password must contain between 12 and 256 characters")
+	}
+	value, err := hash(password)
+	if err != nil {
+		return false, err
+	}
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin password change: %w", err)
+	}
+	defer tx.Rollback()
+	key := digest(id)
+	var exists int
+	if err := tx.QueryRowContext(ctx, "SELECT 1 FROM sessions WHERE token_hash=?", key).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("check password-change session: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT OR REPLACE INTO settings(key,value) VALUES('password_hash',?),('password_change_required','false')", value); err != nil {
+		return false, fmt.Errorf("store password hash: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE sessions SET change_required=FALSE WHERE token_hash=?", key); err != nil {
+		return false, fmt.Errorf("complete password change: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM sessions WHERE token_hash<>?", key); err != nil {
+		return false, fmt.Errorf("revoke other sessions: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit password change: %w", err)
+	}
+	m.mu.Lock()
+	for other := range m.passwordFailures {
+		if other != key {
+			delete(m.passwordFailures, other)
+		}
+	}
+	m.mu.Unlock()
+	return true, nil
+}
 func ValidPassword(p string) bool { return len(p) >= 12 && len(p) <= 256 }
 
 // VerifyPassword compares the configured secret without creating a session or consuming login rate-limit state.
@@ -94,6 +147,55 @@ func (m *Manager) VerifyPassword(ctx context.Context, password string) bool {
 	ok, _ := verify(encoded, password)
 	<-m.hashSlots
 	return ok
+}
+
+// VerifyPasswordForSession limits password-change guesses independently from
+// login throttling. It reserves one of five attempts before hashing, so a
+// concurrent batch cannot queue past the limit. failed reports a completed,
+// incorrect password check and is used for auditing; rejected reservations are
+// deliberately not audited as hash attempts.
+func (m *Manager) VerifyPasswordForSession(ctx context.Context, id, password string) (valid, failed bool, err error) {
+	key := digest(id)
+	m.mu.Lock()
+	state := m.passwordFailures[key]
+	if state == nil {
+		state = &passwordAttempt{}
+		m.passwordFailures[key] = state
+	}
+	if state.revoked || state.failures+state.inFlight >= 5 {
+		m.mu.Unlock()
+		return false, false, nil
+	}
+	state.inFlight++
+	m.mu.Unlock()
+
+	ok := m.VerifyPassword(ctx, password)
+	m.mu.Lock()
+	state.inFlight--
+	if !ok {
+		state.failures++
+		failed = true
+		if state.failures >= 5 {
+			state.revoked = true
+		}
+	}
+	revoke := state.revoked
+	valid = ok && !revoke
+	m.mu.Unlock()
+	if revoke {
+		// The revocation must survive a client that closes the connection
+		// while the password hash is being computed: use a context detached
+		// from the request with a short timeout so the DELETE reaches SQLite.
+		revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		// Keep the revoked marker after deleting the durable session so every
+		// request that already passed HTTP authentication still fails closed.
+		if _, err := m.db.ExecContext(revokeCtx, "DELETE FROM sessions WHERE token_hash=?", key); err != nil {
+			slog.Error("revoke password-change session", "error", err)
+			return false, failed, fmt.Errorf("revoke password-change session: %w", err)
+		}
+	}
+	return valid, failed, nil
 }
 func (m *Manager) Login(ctx context.Context, ip netip.Addr, password string) (string, string, bool, error) {
 	if !ValidPassword(password) {
@@ -152,13 +254,19 @@ func (m *Manager) Login(ctx context.Context, ip netip.Addr, password string) (st
 	return id, csrf, required == "true", nil
 }
 func (m *Manager) Check(ctx context.Context, id, csrf string, write bool) (bool, bool) {
+	m.mu.Lock()
+	revoked := m.passwordFailures[digest(id)] != nil && m.passwordFailures[digest(id)].revoked
+	m.mu.Unlock()
+	if revoked {
+		return false, false
+	}
 	now := m.now()
 	var ch string
 	var created, last, expires int64
 	var required bool
 	err := m.db.QueryRowContext(ctx, "SELECT csrf_hash,created_at,last_seen,expires_at,change_required FROM sessions WHERE token_hash=?", digest(id)).Scan(&ch, &created, &last, &expires, &required)
 	if err != nil || now.Unix() >= expires || now.Sub(time.Unix(last, 0)) > m.idle || now.Sub(time.Unix(created, 0)) > absoluteLifetime {
-		m.Logout(ctx, id)
+		m.logout(ctx, id, true)
 		return false, false
 	}
 	if write && (csrf == "" || subtle.ConstantTimeCompare([]byte(ch), []byte(digest(csrf))) != 1) {
@@ -168,13 +276,36 @@ func (m *Manager) Check(ctx context.Context, id, csrf string, write bool) (bool,
 	return true, required
 }
 func (m *Manager) Logout(ctx context.Context, id string) {
+	m.logout(ctx, id, false)
+}
+
+func (m *Manager) logout(ctx context.Context, id string, preserveAttempt bool) {
 	_, _ = m.db.ExecContext(ctx, "DELETE FROM sessions WHERE token_hash=?", digest(id))
+	if preserveAttempt {
+		// Check can arrive after a concurrent revocation has removed the
+		// durable row; retaining the marker prevents that path from reopening
+		// the five-attempt budget.
+		return
+	}
+	m.mu.Lock()
+	key := digest(id)
+	if state := m.passwordFailures[key]; state == nil || !state.revoked {
+		delete(m.passwordFailures, key)
+	}
+	m.mu.Unlock()
 }
 func (m *Manager) CompletePasswordChange(ctx context.Context, id string) {
 	_, _ = m.db.ExecContext(ctx, "UPDATE sessions SET change_required=FALSE WHERE token_hash=?", digest(id))
 }
 func (m *Manager) RevokeOtherSessions(ctx context.Context, id string) {
 	_, _ = m.db.ExecContext(ctx, "DELETE FROM sessions WHERE token_hash<>?", digest(id))
+	m.mu.Lock()
+	for key := range m.passwordFailures {
+		if key != digest(id) {
+			delete(m.passwordFailures, key)
+		}
+	}
+	m.mu.Unlock()
 }
 func (m *Manager) get(key string) *attempt {
 	if a := m.attempts[key]; a != nil {

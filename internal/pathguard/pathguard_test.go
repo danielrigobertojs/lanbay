@@ -76,3 +76,38 @@ func TestCheckTransferRejectsProtectedSourceAndDestination(t *testing.T) {
 		t.Fatalf("protected destination: %v", err)
 	}
 }
+
+func TestCheckNewRejectsSeparatorsAndEscapes(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "safe")
+	if err := os.Mkdir(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	g := Guard{Roots: []string{root}}
+	for _, name := range []string{`..\\Windows\\evil`, "../Windows/evil", `a\\..\\..\\Windows\\evil`, filepath.Join(root, "absolute")} {
+		if _, err := g.CheckNew(parent, name, true); !errors.Is(err, ErrInvalid) {
+			t.Errorf("name %q: %v", name, err)
+		}
+	}
+}
+
+func TestResolveReturnsOpenedAuthorizedObject(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "file.txt")
+	if err := os.WriteFile(path, []byte("ok"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := (Guard{Roots: []string{root}}).Resolve(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.File() == nil || r.Path() == "" {
+		t.Fatal("resolved object lacks an open handle or canonical path")
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if r.File() != nil {
+		t.Fatal("Close did not release the handle")
+	}
+}

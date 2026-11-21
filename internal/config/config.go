@@ -10,10 +10,19 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const fileName = "config.toml"
+
+const hostCacheTTL = 30 * time.Second
+
+var hostCache struct {
+	sync.Mutex
+	hosts   []string
+	expires time.Time
+}
 
 type Config struct {
 	DataDir          string
@@ -24,6 +33,7 @@ type Config struct {
 	SessionIdle      time.Duration
 	DiskAlertPercent int
 	AllowedHosts     []string
+	ProtectedPaths   []string
 }
 
 func Default(dataDir string) Config {
@@ -31,10 +41,24 @@ func Default(dataDir string) Config {
 }
 func DefaultHosts() []string {
 	h, _ := os.Hostname()
-	result := []string{"localhost", "127.0.0.1", "::1", h, h + ".local"}
-	result = append(result, interfaceIPs()...)
-	return result
+	return []string{"localhost", h, h + ".local"}
 }
+
+// RuntimeHosts returns the local interface addresses for Host validation.
+// They are intentionally not persisted: addresses can change between boots.
+func RuntimeHosts() []string {
+	now := time.Now()
+	hostCache.Lock()
+	defer hostCache.Unlock()
+	if now.Before(hostCache.expires) {
+		return append([]string(nil), hostCache.hosts...)
+	}
+	hostCache.hosts = append(DefaultHosts(), "127.0.0.1", "::1")
+	hostCache.hosts = append(hostCache.hosts, interfaceIPs()...)
+	hostCache.expires = now.Add(hostCacheTTL)
+	return append([]string(nil), hostCache.hosts...)
+}
+
 func interfaceIPs() []string {
 	addrs, _ := net.InterfaceAddrs()
 	var result []string
@@ -96,6 +120,8 @@ func Load(dataDir string) (Config, error) {
 			c.AllowedNetworks = prefixes
 		case "allowed_hosts":
 			c.AllowedHosts = splitStrings(value)
+		case "protected_paths":
+			c.ProtectedPaths = splitStrings(value)
 		}
 	}
 	return c, nil
@@ -113,7 +139,11 @@ func Save(c Config) error {
 	for _, host := range c.AllowedHosts {
 		hosts = append(hosts, "\""+host+"\"")
 	}
-	content := fmt.Sprintf("listen = %q\ncertificate_file = %q\nkey_file = %q\nsession_idle_hours = %d\ndisk_alert_percent = %d\nallowed_networks = [%s]\nallowed_hosts = [%s]\n", c.Listen, c.CertificateFile, c.KeyFile, int(c.SessionIdle.Hours()), c.DiskAlertPercent, strings.Join(prefixes, ", "), strings.Join(hosts, ", "))
+	protected := make([]string, 0, len(c.ProtectedPaths))
+	for _, path := range c.ProtectedPaths {
+		protected = append(protected, "\""+path+"\"")
+	}
+	content := fmt.Sprintf("listen = %q\ncertificate_file = %q\nkey_file = %q\nsession_idle_hours = %d\ndisk_alert_percent = %d\nallowed_networks = [%s]\nallowed_hosts = [%s]\nprotected_paths = [%s]\n", c.Listen, c.CertificateFile, c.KeyFile, int(c.SessionIdle.Hours()), c.DiskAlertPercent, strings.Join(prefixes, ", "), strings.Join(hosts, ", "), strings.Join(protected, ", "))
 	return os.WriteFile(filepath.Join(c.DataDir, fileName), []byte(content), 0600)
 }
 func splitStrings(value string) []string {

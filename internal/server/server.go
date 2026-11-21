@@ -7,8 +7,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/danielrigobertojs/lanbay/internal/auth"
 	"github.com/danielrigobertojs/lanbay/internal/config"
+	"github.com/danielrigobertojs/lanbay/internal/files"
+	"github.com/danielrigobertojs/lanbay/internal/jobs"
+	"github.com/danielrigobertojs/lanbay/internal/pathguard"
+	"github.com/danielrigobertojs/lanbay/internal/platform"
+	"github.com/danielrigobertojs/lanbay/internal/uploads"
 	"github.com/danielrigobertojs/lanbay/internal/volumes"
 	lanbayweb "github.com/danielrigobertojs/lanbay/internal/web"
 	"log/slog"
@@ -17,7 +23,10 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,10 +36,20 @@ type Server struct {
 	volumes volumes.Provider
 	db      *sql.DB
 	version string
+	auditMu sync.Mutex
+	jobs    *jobs.Manager
+	uploads *uploads.Manager
 }
 
 func New(c config.Config, db *sql.DB, provider volumes.Provider, version string) *Server {
-	return &Server{config: c, auth: auth.New(db, c.SessionIdle), volumes: provider, db: db, version: version}
+	s := &Server{config: c, auth: auth.New(db, c.SessionIdle), volumes: provider, db: db, version: version}
+	if db != nil {
+		s.jobs, _ = jobs.New(db)
+		if s.jobs != nil {
+			s.uploads = uploads.New(db, s.jobs)
+		}
+	}
+	return s
 }
 func (s *Server) Initialize(ctx context.Context) (string, error) { return s.auth.EnsurePassword(ctx) }
 func (s *Server) SetPassword(ctx context.Context, password string) error {
@@ -58,17 +77,29 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/password", s.password)
 	mux.HandleFunc("GET /api/v1/system", s.system)
 	mux.HandleFunc("GET /api/v1/volumes", s.volumeList)
+	mux.HandleFunc("GET /api/v1/files", s.fileList)
+	mux.HandleFunc("POST /api/v1/files/mkdir", s.fileMkdir)
+	mux.HandleFunc("POST /api/v1/files/rename", s.fileRename)
+	mux.HandleFunc("POST /api/v1/files/move", s.fileMove)
+	mux.HandleFunc("POST /api/v1/files/copy", s.fileCopy)
+	mux.HandleFunc("DELETE /api/v1/files", s.fileDelete)
+	mux.HandleFunc("GET /api/v1/files/download", s.fileDownload)
+	mux.HandleFunc("POST /api/v1/uploads", s.uploadCreate)
+	mux.HandleFunc("PATCH /api/v1/uploads/{id}", s.uploadChunk)
+	mux.HandleFunc("DELETE /api/v1/uploads/{id}", s.uploadCancel)
+	mux.HandleFunc("GET /api/v1/jobs", s.jobList)
+	mux.HandleFunc("POST /api/v1/jobs/{id}/cancel", s.jobCancel)
+	mux.HandleFunc("GET /api/v1/events", s.events)
 	mux.Handle("GET /", lanbayweb.Handler())
 	return s.network(s.host(s.headers(s.log(mux))))
 }
-
 func (s *Server) host(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host, _, err := net.SplitHostPort(r.Host)
 		if err != nil {
 			host = r.Host
 		}
-		if host == "" || !allowedHost(host, append(s.config.AllowedHosts, config.DefaultHosts()...)) {
+		if host == "" || !allowedHost(host, slices.Concat(s.config.AllowedHosts, config.RuntimeHosts())) {
 			http.Error(w, "host no permitido", http.StatusMisdirectedRequest)
 			return
 		}
@@ -84,7 +115,6 @@ func allowedHost(host string, allowed []string) bool {
 	}
 	return false
 }
-
 func (s *Server) headers(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; media-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
@@ -102,6 +132,323 @@ func (s *Server) headers(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+func (s *Server) fileManager(ctx context.Context) (files.Manager, error) {
+	vs, err := s.volumes.List(ctx)
+	if err != nil {
+		return files.Manager{}, err
+	}
+	roots := make([]string, 0, len(vs))
+	for _, v := range vs {
+		roots = append(roots, v.ID)
+	}
+	protected, err := platform.ProtectedPaths(s.config.DataDir, s.config.ProtectedPaths)
+	if err != nil {
+		return files.Manager{}, err
+	}
+	return files.Manager{Guard: pathguard.Guard{Roots: roots, Protected: protected}, Trash: files.NewTrash()}, nil
+}
+func (s *Server) fileList(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, false) {
+		return
+	}
+	m, e := s.fileManager(r.Context())
+	if e != nil {
+		http.Error(w, "no se pudieron enumerar los volúmenes", 500)
+		return
+	}
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	per, _ := strconv.Atoi(q.Get("per_page"))
+	out, e := m.List(r.Context(), q.Get("path"), files.ListOptions{Page: page, PerPage: per, Sort: q.Get("sort"), Hidden: q.Get("hidden") == "true", System: q.Get("system") == "true"})
+	if e != nil {
+		fileError(w, e)
+		return
+	}
+	json.NewEncoder(w).Encode(out)
+}
+func (s *Server) fileMkdir(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, true) {
+		return
+	}
+	var in struct{ Parent, Name string }
+	if json.NewDecoder(r.Body).Decode(&in) != nil {
+		http.Error(w, "solicitud inválida", 400)
+		return
+	}
+	m, e := s.fileManager(r.Context())
+	if e == nil {
+		_, e = m.Mkdir(r.Context(), in.Parent, in.Name)
+	}
+	if e != nil {
+		fileError(w, e)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+}
+func (s *Server) fileRename(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, true) {
+		return
+	}
+	var in struct{ Path, Name string }
+	if json.NewDecoder(r.Body).Decode(&in) != nil {
+		http.Error(w, "solicitud inválida", 400)
+		return
+	}
+	m, e := s.fileManager(r.Context())
+	if e == nil {
+		_, e = m.Rename(r.Context(), in.Path, in.Name)
+	}
+	if e != nil {
+		fileError(w, e)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+func (s *Server) fileMove(w http.ResponseWriter, r *http.Request) { s.fileTransfer(w, r, true) }
+func (s *Server) fileCopy(w http.ResponseWriter, r *http.Request) { s.fileTransfer(w, r, false) }
+func (s *Server) fileTransfer(w http.ResponseWriter, r *http.Request, move bool) {
+	if !s.session(w, r, true) {
+		return
+	}
+	var in struct{ Source, Parent, Name string }
+	if json.NewDecoder(r.Body).Decode(&in) != nil {
+		http.Error(w, "solicitud inválida", 400)
+		return
+	}
+	m, e := s.fileManager(r.Context())
+	if e == nil && s.jobs == nil {
+		e = errors.New("jobs no disponibles")
+	}
+	if e != nil {
+		fileError(w, e)
+		return
+	}
+	kind := "copy"
+	if move {
+		kind = "move"
+	}
+	j, e := s.jobs.Create(r.Context(), kind, 0)
+	if e != nil {
+		http.Error(w, "no se pudo crear el job", 500)
+		return
+	}
+	s.jobs.Start(j, func(ctx context.Context) error {
+		if move {
+			return m.Move(ctx, in.Source, in.Parent, in.Name)
+		}
+		return m.Copy(ctx, in.Source, in.Parent, in.Name)
+	})
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(j)
+}
+func (s *Server) fileDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, true) {
+		return
+	}
+	var in struct {
+		Path      string
+		Permanent bool `json:"permanent"`
+	}
+	if json.NewDecoder(r.Body).Decode(&in) != nil {
+		http.Error(w, "solicitud inválida", 400)
+		return
+	}
+	m, e := s.fileManager(r.Context())
+	if e == nil {
+		volumes, listErr := s.volumes.List(r.Context())
+		if listErr != nil {
+			e = listErr
+		} else {
+			e = m.Delete(r.Context(), in.Path, files.DeleteOptions{Permanent: in.Permanent, Recycle: recycleAvailable(in.Path, volumes)})
+		}
+	}
+	if e != nil {
+		fileError(w, e)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+func recycleAvailable(path string, items []volumes.Volume) bool {
+	for _, item := range items {
+		if strings.HasPrefix(strings.ToLower(strings.ReplaceAll(path, "/", "\\")), strings.ToLower(item.ID)) {
+			return item.Recycle
+		}
+	}
+	return false
+}
+func (s *Server) fileDownload(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, false) {
+		return
+	}
+	m, err := s.fileManager(r.Context())
+	if err != nil {
+		http.Error(w, "no se pudieron enumerar los volúmenes", 500)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if r.URL.Query().Get("zip") == "true" {
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", `attachment; filename="lanbay-download.zip"`)
+		w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
+		if err := m.Zip(r.Context(), path, w); err != nil {
+			fileError(w, err)
+		}
+		return
+	}
+	f, info, err := m.Open(path)
+	if err != nil {
+		fileError(w, err)
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(filepath.Base(info.Name())))
+	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
+}
+func fileError(w http.ResponseWriter, e error) {
+	code := http.StatusBadRequest
+	if errors.Is(e, pathguard.ErrProtected) || errors.Is(e, pathguard.ErrRoot) {
+		code = http.StatusForbidden
+	}
+	http.Error(w, e.Error(), code)
+}
+func (s *Server) uploadCreate(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, true) {
+		return
+	}
+	if s.uploads == nil {
+		http.Error(w, "subidas no disponibles", http.StatusServiceUnavailable)
+		return
+	}
+	var in struct {
+		Parent string `json:"parent"`
+		Name   string `json:"name"`
+		Size   int64  `json:"size_bytes"`
+		Chunk  int64  `json:"chunk_size"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil {
+		http.Error(w, "solicitud inválida", 400)
+		return
+	}
+	m, err := s.fileManager(r.Context())
+	if err == nil {
+		session, createErr := s.uploads.Create(r.Context(), m.Guard, in.Parent, in.Name, in.Size, in.Chunk)
+		err = createErr
+		if err == nil {
+			w.Header().Set("Location", "/api/v1/uploads/"+session.ID)
+			w.Header().Set("Upload-Offset", "0")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(session)
+			return
+		}
+	}
+	fileError(w, err)
+}
+func (s *Server) uploadChunk(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, true) {
+		return
+	}
+	if s.uploads == nil {
+		http.Error(w, "subidas no disponibles", http.StatusServiceUnavailable)
+		return
+	}
+	offset, err := strconv.ParseInt(r.Header.Get("Upload-Offset"), 10, 64)
+	if err != nil || offset < 0 || r.ContentLength <= 0 || r.ContentLength > uploads.MaxChunk {
+		http.Error(w, "chunk inválido", 400)
+		return
+	}
+	session, err := s.uploads.Write(r.Context(), r.PathValue("id"), offset, r.ContentLength, http.MaxBytesReader(w, r.Body, uploads.MaxChunk))
+	if err != nil {
+		fileError(w, err)
+		return
+	}
+	w.Header().Set("Upload-Offset", strconv.FormatInt(session.Offset, 10))
+	w.Header().Set("Upload-State", session.State)
+	w.WriteHeader(http.StatusNoContent)
+}
+func (s *Server) uploadCancel(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, true) {
+		return
+	}
+	if s.uploads == nil {
+		http.Error(w, "subidas no disponibles", http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.uploads.Cancel(r.Context(), r.PathValue("id")); err != nil {
+		fileError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+func (s *Server) jobList(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, false) {
+		return
+	}
+	if s.jobs == nil {
+		http.Error(w, "jobs no disponibles", http.StatusServiceUnavailable)
+		return
+	}
+	items, err := s.jobs.List(r.Context())
+	if err != nil {
+		http.Error(w, "no se pudieron leer los jobs", 500)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"jobs": items})
+}
+func (s *Server) jobCancel(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, true) {
+		return
+	}
+	if s.jobs == nil {
+		http.Error(w, "jobs no disponibles", http.StatusServiceUnavailable)
+		return
+	}
+	id := r.PathValue("id")
+	var uploadID string
+	err := s.db.QueryRowContext(r.Context(), "SELECT id FROM uploads WHERE job_id=? AND state='active'", id).Scan(&uploadID)
+	if err == nil {
+		err = s.uploads.Cancel(r.Context(), uploadID)
+	} else if errors.Is(err, sql.ErrNoRows) {
+		err = s.jobs.Cancel(r.Context(), id)
+	}
+	if err != nil {
+		fileError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+func (s *Server) events(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, false) {
+		return
+	}
+	if s.jobs == nil {
+		http.Error(w, "jobs no disponibles", http.StatusServiceUnavailable)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming no disponible", 500)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	events, stop := s.jobs.Subscribe()
+	defer stop()
+	fmt.Fprint(w, ": connected\n\n")
+	flusher.Flush()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event := <-events:
+			data, _ := json.Marshal(event)
+			fmt.Fprintf(w, "event: job\ndata: %s\n\n", data)
+			flusher.Flush()
+		}
+	}
 }
 func (s *Server) network(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -139,7 +486,8 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request, write bool) boo
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Password string `json:"password"`
+		Password        string `json:"password"`
+		CurrentPassword string `json:"current_password"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -151,16 +499,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "solicitud inválida", 400)
 		return
 	}
-	if !auth.ValidPassword(in.Password) {
-		s.audit(r, "login", "failed")
-		http.Error(w, "credenciales no válidas", http.StatusUnauthorized)
-		return
-	}
 	ip := remoteIP(r)
 	id, csrf, change, e := s.auth.Login(r.Context(), ip, in.Password)
 	if e != nil {
 		s.audit(r, "login", "failed")
-		http.Error(w, "credenciales no válidas", http.StatusUnauthorized)
+		http.Error(w, e.Error(), http.StatusUnauthorized)
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: auth.CookieName, Value: id, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: int(s.config.SessionIdle.Seconds())})
@@ -181,25 +524,48 @@ func (s *Server) password(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		CurrentPassword string `json:"current_password"`
 		Password        string `json:"password"`
+		CurrentPassword string `json:"current_password"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if json.NewDecoder(r.Body).Decode(&in) != nil {
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "solicitud demasiado grande", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "solicitud inválida", 400)
 		return
 	}
-	if !s.auth.VerifyPassword(r.Context(), in.CurrentPassword) {
+	cookie, _ := r.Cookie(auth.CookieName)
+	verified, failed, e := s.auth.VerifyPasswordForSession(r.Context(), cookie.Value, in.CurrentPassword)
+	if e != nil {
+		if failed {
+			s.audit(r, "password_change", "failed")
+		}
+		http.Error(w, "no se pudo revocar la sesión", http.StatusInternalServerError)
+		return
+	}
+	if !verified {
+		if failed {
+			s.audit(r, "password_change", "failed")
+		}
 		http.Error(w, "credenciales no válidas", http.StatusUnauthorized)
 		return
 	}
-	if e := s.SetPassword(r.Context(), in.Password); e != nil {
+	changed, e := s.auth.ChangePasswordForSession(r.Context(), cookie.Value, in.Password)
+	if e != nil {
 		http.Error(w, e.Error(), 400)
 		return
 	}
-	cookie, _ := r.Cookie(auth.CookieName)
-	s.auth.CompletePasswordChange(r.Context(), cookie.Value)
-	s.auth.RevokeOtherSessions(r.Context(), cookie.Value)
+	if !changed {
+		http.Error(w, "sesión no válida o CSRF inválido", http.StatusUnauthorized)
+		return
+	}
+	if e := os.Remove(filepath.Join(s.config.DataDir, "initial-password.txt")); e != nil && !os.IsNotExist(e) {
+		http.Error(w, e.Error(), http.StatusBadRequest)
+		return
+	}
 	s.audit(r, "password_change", "ok")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -207,8 +573,7 @@ func (s *Server) system(w http.ResponseWriter, r *http.Request) {
 	if !s.session(w, r, false) {
 		return
 	}
-	fingerprint, _ := CertificateFingerprint(s.config.CertificateFile)
-	json.NewEncoder(w).Encode(map[string]string{"hostname": hostname(), "version": s.version, "platform": "desarrollo", "certificate_fingerprint": fingerprint})
+	json.NewEncoder(w).Encode(map[string]string{"hostname": hostname(), "version": s.version, "platform": "desarrollo"})
 }
 func (s *Server) volumeList(w http.ResponseWriter, r *http.Request) {
 	if !s.session(w, r, false) {
@@ -227,5 +592,14 @@ func remoteIP(r *http.Request) netip.Addr {
 }
 func hostname() string { h, _ := os.Hostname(); return h }
 func (s *Server) audit(r *http.Request, action, result string) {
-	_, _ = s.db.ExecContext(r.Context(), "INSERT INTO audit_log(created_at,ip,action,result) VALUES(?,?,?,?)", time.Now().UTC().Format(time.RFC3339), remoteIP(r).String(), action, result)
+	// SQLite accepts one writer at a time. Audit records are security evidence,
+	// so concurrent requests must not silently lose one to a busy writer.
+	// Use a context detached from the request so a client that closes the
+	// connection does not drop the audit INSERT.
+	s.auditMu.Lock()
+	defer s.auditMu.Unlock()
+	ctx := context.WithoutCancel(r.Context())
+	if _, err := s.db.ExecContext(ctx, "INSERT INTO audit_log(created_at,ip,action,result) VALUES(?,?,?,?)", time.Now().UTC().Format(time.RFC3339), remoteIP(r).String(), action, result); err != nil {
+		slog.Error("write audit record", "action", action, "result", result, "error", err)
+	}
 }

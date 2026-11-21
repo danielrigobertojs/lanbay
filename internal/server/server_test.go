@@ -4,15 +4,25 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
+	"github.com/danielrigobertojs/lanbay/internal/auth"
 	"github.com/danielrigobertojs/lanbay/internal/config"
+	"github.com/danielrigobertojs/lanbay/internal/pathguard"
 	"github.com/danielrigobertojs/lanbay/internal/store"
+	"github.com/danielrigobertojs/lanbay/internal/volumes"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
+
+type fixedVolumes []volumes.Volume
+
+func (v fixedVolumes) List(context.Context) ([]volumes.Volume, error) { return v, nil }
 
 func TestAllowedIP(t *testing.T) {
 	networks := config.DefaultNetworks()
@@ -25,6 +35,43 @@ func TestAllowedIP(t *testing.T) {
 		if AllowedIP(netip.MustParseAddr(s), networks) {
 			t.Errorf("%s should be rejected", s)
 		}
+	}
+}
+
+func TestRecycleAvailable(t *testing.T) {
+	items := []volumes.Volume{{ID: `C:\\`, Recycle: true}, {ID: `D:\\`, Recycle: false}}
+	if !recycleAvailable(`c:\\Users\\owner\\file.txt`, items) {
+		t.Fatal("fixed NTFS volume should recycle")
+	}
+	if recycleAvailable(`D:\\file.txt`, items) {
+		t.Fatal("removable volume must require permanent confirmation")
+	}
+	if recycleAvailable(`E:\\file.txt`, items) {
+		t.Fatal("unknown volume must fail closed")
+	}
+}
+
+func TestFileManagerProtectsConfiguredZones(t *testing.T) {
+	root := t.TempDir()
+	data := filepath.Join(root, "data")
+	protected := filepath.Join(root, "protected")
+	for _, path := range []string{data, protected} {
+		if err := os.Mkdir(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := config.Default(data)
+	c.ProtectedPaths = []string{protected}
+	s := New(c, nil, fixedVolumes{{ID: root}}, "test")
+	m, err := s.fileManager(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Guard.Check(protected, true); !errors.Is(err, pathguard.ErrProtected) {
+		t.Fatalf("write to configured protected zone = %v", err)
+	}
+	if _, err := m.Guard.Check(root, true); !errors.Is(err, pathguard.ErrRoot) {
+		t.Fatalf("write to volume root = %v", err)
 	}
 }
 
@@ -65,6 +112,108 @@ func TestHandlerRejectsHostOriginAndLargeBody(t *testing.T) {
 	}
 	if got := request(s, http.MethodPost, "https://localhost/api/v1/auth/login", "localhost", "", []byte(`{"password":"`+strings.Repeat("a", 1<<20)+`"}`)).Code; got != http.StatusRequestEntityTooLarge {
 		t.Fatalf("body=%d", got)
+	}
+}
+
+func TestPasswordEndpointRequiresCurrentPassword(t *testing.T) {
+	s := testServer(t)
+	id, csrf, _, err := s.auth.Login(context.Background(), netip.MustParseAddr("127.0.0.1"), "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{`{"password":"new correct battery"}`, `{"current_password":"wrong password value","password":"new correct battery"}`} {
+		r := httptest.NewRequest(http.MethodPost, "https://localhost/api/v1/auth/password", strings.NewReader(body))
+		r.Host = "localhost"
+		r.RemoteAddr = "127.0.0.1:1234"
+		r.AddCookie(&http.Cookie{Name: auth.CookieName, Value: id})
+		r.Header.Set("X-CSRF-Token", csrf)
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("body %q: %d", body, w.Code)
+		}
+	}
+}
+
+func TestPasswordEndpointAuditsAndRevokesAfterFiveFailures(t *testing.T) {
+	s := testServer(t)
+	id, csrf, _, err := s.auth.Login(context.Background(), netip.MustParseAddr("127.0.0.1"), "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		r := httptest.NewRequest(http.MethodPost, "https://localhost/api/v1/auth/password", strings.NewReader(`{"current_password":"wrong password value","password":"new correct battery"}`))
+		r.Host = "localhost"
+		r.RemoteAddr = "127.0.0.1:1234"
+		r.AddCookie(&http.Cookie{Name: auth.CookieName, Value: id})
+		r.Header.Set("X-CSRF-Token", csrf)
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("failure %d: %d", i+1, w.Code)
+		}
+	}
+	if ok, _ := s.auth.Check(context.Background(), id, csrf, false); ok {
+		t.Fatal("session remains valid after five password-change failures")
+	}
+	var audits int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM audit_log WHERE action='password_change' AND result='failed'").Scan(&audits); err != nil || audits != 5 {
+		t.Fatalf("failed password-change audits = %d, %v", audits, err)
+	}
+}
+
+func TestPasswordEndpointConcurrentFailuresAreBounded(t *testing.T) {
+	s := testServer(t)
+	id, csrf, _, err := s.auth.Login(context.Background(), netip.MustParseAddr("127.0.0.1"), "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const requests = 20
+	start := make(chan struct{})
+	codes := make(chan int, requests)
+	var wg sync.WaitGroup
+	for range requests {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			r := httptest.NewRequest(http.MethodPost, "https://localhost/api/v1/auth/password", strings.NewReader(`{"current_password":"wrong password value","password":"new correct battery"}`))
+			r.Host = "localhost"
+			r.RemoteAddr = "127.0.0.1:1234"
+			r.AddCookie(&http.Cookie{Name: auth.CookieName, Value: id})
+			r.Header.Set("X-CSRF-Token", csrf)
+			w := httptest.NewRecorder()
+			s.Handler().ServeHTTP(w, r)
+			codes <- w.Code
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(codes)
+	for code := range codes {
+		if code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", code)
+		}
+	}
+	var audits int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM audit_log WHERE action='password_change' AND result='failed'").Scan(&audits); err != nil || audits != 5 {
+		t.Fatalf("failed password-change audits = %d, %v", audits, err)
+	}
+	if ok, _ := s.auth.Check(context.Background(), id, csrf, false); ok {
+		t.Fatal("session remains valid after concurrent failures")
+	}
+	r := httptest.NewRequest(http.MethodPost, "https://localhost/api/v1/auth/password", strings.NewReader(`{"current_password":"correct horse battery","password":"new correct battery"}`))
+	r.Host = "localhost"
+	r.RemoteAddr = "127.0.0.1:1234"
+	r.AddCookie(&http.Cookie{Name: auth.CookieName, Value: id})
+	r.Header.Set("X-CSRF-Token", csrf)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("correct password after revocation status = %d, want 401", w.Code)
+	}
+	if !s.auth.VerifyPassword(context.Background(), "correct horse battery") || s.auth.VerifyPassword(context.Background(), "new correct battery") {
+		t.Fatal("password changed after session revocation")
 	}
 }
 

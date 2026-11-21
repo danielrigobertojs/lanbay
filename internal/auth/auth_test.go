@@ -9,6 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -19,6 +20,7 @@ func manager(t *testing.T) *Manager {
 	if e != nil {
 		t.Fatal(e)
 	}
+	db.SetMaxOpenConns(1)
 	if _, e = db.Exec("CREATE TABLE settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE sessions (token_hash TEXT PRIMARY KEY, csrf_hash TEXT NOT NULL, created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL, expires_at INTEGER NOT NULL, change_required BOOLEAN NOT NULL)"); e != nil {
 		t.Fatal(e)
 	}
@@ -95,6 +97,117 @@ func TestVerifyPasswordDoesNotCreateSession(t *testing.T) {
 	}
 }
 
+func TestVerifyPasswordForSessionRevokesAfterFiveFailures(t *testing.T) {
+	m := manager(t)
+	if err := m.SetPassword(context.Background(), "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	id, csrf, _, err := m.Login(context.Background(), netip.MustParseAddr("10.0.0.8"), "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if ok, _, err := m.VerifyPasswordForSession(context.Background(), id, "wrong password value"); err != nil || ok {
+			t.Fatal("wrong password accepted")
+		}
+		if ok, _ := m.Check(context.Background(), id, csrf, false); !ok {
+			t.Fatalf("session revoked after %d failures", i+1)
+		}
+	}
+	if ok, _, err := m.VerifyPasswordForSession(context.Background(), id, "wrong password value"); err != nil || ok {
+		t.Fatal("wrong password accepted")
+	}
+	if ok, _ := m.Check(context.Background(), id, csrf, false); ok {
+		t.Fatal("session remains valid after five failures")
+	}
+}
+
+func TestVerifyPasswordForSessionReservesConcurrentAttempts(t *testing.T) {
+	m := manager(t)
+	if err := m.SetPassword(context.Background(), "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	id, csrf, _, err := m.Login(context.Background(), netip.MustParseAddr("10.0.0.8"), "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const requests = 20
+	start := make(chan struct{})
+	results := make(chan bool, requests)
+	var wg sync.WaitGroup
+	for range requests {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, failed, err := m.VerifyPasswordForSession(context.Background(), id, "wrong password value")
+			if err != nil {
+				t.Errorf("verify password: %v", err)
+			}
+			results <- failed
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	failed := 0
+	for result := range results {
+		if result {
+			failed++
+		}
+	}
+	if failed != 5 {
+		t.Fatalf("hashed failures = %d, want 5", failed)
+	}
+	if ok, _ := m.Check(context.Background(), id, csrf, false); ok {
+		t.Fatal("session remains valid after concurrent failures")
+	}
+	if ok, failed, err := m.VerifyPasswordForSession(context.Background(), id, "correct horse battery"); err != nil || ok || failed {
+		t.Fatalf("correct password after revocation = %t, failed = %t", ok, failed)
+	}
+}
+
+func TestChangePasswordForSessionRequiresExistingSession(t *testing.T) {
+	m := manager(t)
+	if err := m.SetPassword(context.Background(), "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	id, _, _, err := m.Login(context.Background(), netip.MustParseAddr("10.0.0.8"), "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Logout(context.Background(), id)
+	changed, err := m.ChangePasswordForSession(context.Background(), id, "new correct battery")
+	if err != nil || changed {
+		t.Fatalf("changed = %t, err = %v", changed, err)
+	}
+	if !m.VerifyPassword(context.Background(), "correct horse battery") || m.VerifyPassword(context.Background(), "new correct battery") {
+		t.Fatal("password changed after session revocation")
+	}
+}
+
+func TestVerifyPasswordForSessionRevokesWithCanceledContext(t *testing.T) {
+	m := manager(t)
+	if err := m.SetPassword(context.Background(), "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	id, _, _, err := m.Login(context.Background(), netip.MustParseAddr("10.0.0.8"), "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < 5; i++ {
+		if _, _, err := m.VerifyPasswordForSession(ctx, id, "wrong password value"); err != nil {
+			t.Fatalf("iteration %d: %v", i, err)
+		}
+	}
+	var sessions int
+	if err := m.db.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&sessions); err != nil || sessions != 0 {
+		t.Fatalf("sessions=%d err=%v", sessions, err)
+	}
+}
+
 func TestIPv6AttemptsShare64AndCleanup(t *testing.T) {
 	m := manager(t)
 	if attemptKey(netip.MustParseAddr("fd00::1")) != attemptKey(netip.MustParseAddr("fd00::2")) {
@@ -136,5 +249,54 @@ func TestLoginRehashesLegacyPHCParameters(t *testing.T) {
 	}
 	if got == legacy {
 		t.Fatal("legacy PHC was not rehashed")
+	}
+}
+
+func TestMalformedPHCIsRejected(t *testing.T) {
+	m := manager(t)
+	if _, err := m.db.Exec("INSERT INTO settings(key,value) VALUES('password_hash','not-a-phc')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := m.Login(context.Background(), netip.MustParseAddr("10.0.0.1"), "correct horse battery"); err == nil {
+		t.Fatal("malformed PHC accepted")
+	}
+}
+
+func TestSessionIdleAndAbsoluteExpiry(t *testing.T) {
+	m := manager(t)
+	now := time.Now()
+	m.now = func() time.Time { return now }
+	if err := m.SetPassword(context.Background(), "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	id, csrf, _, err := m.Login(context.Background(), netip.MustParseAddr("10.0.0.1"), "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Hour + time.Second)
+	if ok, _ := m.Check(context.Background(), id, csrf, false); ok {
+		t.Fatal("idle session accepted")
+	}
+	id, csrf, _, err = m.Login(context.Background(), netip.MustParseAddr("10.0.0.1"), "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(absoluteLifetime + time.Second)
+	if ok, _ := m.Check(context.Background(), id, csrf, false); ok {
+		t.Fatal("absolute expiry accepted")
+	}
+}
+
+func TestRevokeOtherSessions(t *testing.T) {
+	m := manager(t)
+	_ = m.SetPassword(context.Background(), "correct horse battery")
+	a, csrfA, _, _ := m.Login(context.Background(), netip.MustParseAddr("10.0.0.1"), "correct horse battery")
+	b, csrfB, _, _ := m.Login(context.Background(), netip.MustParseAddr("10.0.0.2"), "correct horse battery")
+	m.RevokeOtherSessions(context.Background(), a)
+	if ok, _ := m.Check(context.Background(), a, csrfA, false); !ok {
+		t.Fatal("kept session revoked")
+	}
+	if ok, _ := m.Check(context.Background(), b, csrfB, false); ok {
+		t.Fatal("other session remains")
 	}
 }

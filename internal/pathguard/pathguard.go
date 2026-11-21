@@ -5,6 +5,7 @@ package pathguard
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -19,15 +20,137 @@ var (
 
 type Guard struct{ Roots, Protected []string }
 
-func (g Guard) Check(client string, write bool) (string, error) {
+// Resolved is an authorized, opened filesystem object. Its fields are private
+// so only pathguard can construct it from a client-supplied path.
+type Resolved struct {
+	path    string
+	file    *os.File
+	reparse bool
+}
+
+func (r *Resolved) Close() error {
+	if r == nil || r.file == nil {
+		return nil
+	}
+	err := r.file.Close()
+	r.file = nil
+	return err
+}
+
+// File returns the already-open validated handle. It is for the internal
+// filesystem boundary; callers must not close it separately.
+func (r *Resolved) File() *os.File { return r.file }
+
+// TakeFile transfers ownership of the validated handle to the caller. It is
+// for downloads and other operations that must outlive Resolved itself.
+func (r *Resolved) TakeFile() *os.File {
+	if r == nil {
+		return nil
+	}
+	f := r.file
+	r.file = nil
+	return f
+}
+
+// Path is canonical and intended only for display/logging, never for reopening
+// a mutating client operation.
+func (r *Resolved) Path() string { return r.path }
+
+// Reparse reports whether this handle names a reparse point. Walkers must not
+// traverse such entries: their target was deliberately not opened.
+func (r *Resolved) Reparse() bool { return r != nil && r.reparse }
+
+// OpenChild opens name relative to an already authorized directory handle.
+// It never follows a reparse point. container requests a handle suitable for
+// enumerating and changing descendants; write also grants deletion of the
+// child itself. This is intentionally an internal capability API.
+func OpenChild(parent *Resolved, name string, write, container bool) (*Resolved, error) {
+	if parent == nil || parent.file == nil {
+		return nil, fmt.Errorf("closed parent handle")
+	}
+	if err := lexicalName(name); err != nil {
+		return nil, err
+	}
+	return openChild(parent, name, write, container)
+}
+
+// Resolve validates client and opens its final object before returning it.
+func (g Guard) Resolve(client string, write bool) (*Resolved, error) {
 	if err := lexical(client); err != nil {
+		return nil, err
+	}
+	r, err := resolveOpen(client, write, false)
+	if err != nil {
+		return nil, fmt.Errorf("resolve existing path: %w", err)
+	}
+	if _, err := g.authorize(r.path, write); err != nil {
+		_ = r.Close()
+		return nil, err
+	}
+	return r, nil
+}
+
+// ResolveParent opens an existing directory for a child mutation. Unlike
+// Resolve(..., true), an allowed volume root is valid here because the root
+// itself is not being renamed or deleted.
+func (g Guard) ResolveParent(client string) (*Resolved, error) {
+	if err := lexical(client); err != nil {
+		return nil, err
+	}
+	// Parent handles are only used as RootDirectory handles for relative
+	// operations. They require traversal/metadata access, not DELETE access.
+	r, err := resolveOpen(client, false, true)
+	if err != nil {
+		return nil, fmt.Errorf("resolve parent: %w", err)
+	}
+	if _, err := g.authorizeParent(r.path); err != nil {
+		_ = r.Close()
+		return nil, err
+	}
+	return r, nil
+}
+
+// ResolveContainer is Resolve for a directory that will have its descendants
+// enumerated or changed. It is not valid for a regular file.
+func (g Guard) ResolveContainer(client string, write bool) (*Resolved, error) {
+	if err := lexical(client); err != nil {
+		return nil, err
+	}
+	r, err := resolveOpen(client, write, true)
+	if err != nil {
+		return nil, fmt.Errorf("resolve container: %w", err)
+	}
+	if _, err := g.authorize(r.path, write); err != nil {
+		_ = r.Close()
+		return nil, err
+	}
+	return r, nil
+}
+
+// ResolveWalk opens a root for recursive enumeration and, when requested,
+// deletion. Unlike ResolveParent it does not request creation rights.
+func (g Guard) ResolveWalk(client string, write bool) (*Resolved, error) {
+	if err := lexical(client); err != nil {
+		return nil, err
+	}
+	r, err := resolveWalkOpen(client, write)
+	if err != nil {
+		return nil, fmt.Errorf("resolve walk root: %w", err)
+	}
+	if _, err := g.authorize(r.path, write); err != nil {
+		_ = r.Close()
+		return nil, err
+	}
+	return r, nil
+}
+
+func (g Guard) Check(client string, write bool) (string, error) {
+	r, err := g.Resolve(client, write)
+	if err != nil {
 		return "", err
 	}
-	p, err := resolve(client)
-	if err != nil {
-		return "", fmt.Errorf("resolve existing path: %w", err)
-	}
-	return g.authorize(p, write)
+	defer r.Close()
+	return r.path, nil
 }
 
 // CheckNew validates an untrusted leaf below an existing, authorized parent.
@@ -39,18 +162,14 @@ func (g Guard) CheckNew(parent, name string, write bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if write {
-		for _, protected := range g.Protected {
-			canonical, e := resolve(protected)
-			if e != nil {
-				return "", fmt.Errorf("resolve protected zone: %w", e)
-			}
-			if within(p, canonical) {
-				return "", ErrProtected
-			}
-		}
+	result, err := g.authorize(filepath.Join(p, name), write)
+	if err != nil {
+		return "", err
 	}
-	return filepath.Join(p, name), nil
+	if !samePath(filepath.Dir(result), p) {
+		return "", ErrInvalid
+	}
+	return result, nil
 }
 
 // CheckTransfer authorizes both ends of a copy or move. The source is checked
@@ -70,6 +189,10 @@ func (g Guard) CheckTransfer(source, destination string) (string, string, error)
 }
 
 func (g Guard) authorize(path string, write bool) (string, error) {
+	return g.authorizeWithRoot(path, write, false)
+}
+
+func (g Guard) authorizeParent(path string) (string, error) {
 	p := filepath.Clean(path)
 	root := ""
 	for _, candidate := range g.Roots {
@@ -85,7 +208,35 @@ func (g Guard) authorize(path string, write bool) (string, error) {
 	if root == "" {
 		return "", ErrOutside
 	}
-	if write && samePath(p, root) {
+	for _, protected := range g.Protected {
+		canonical, err := resolve(protected)
+		if err != nil {
+			return "", fmt.Errorf("resolve protected zone: %w", err)
+		}
+		if within(p, canonical) {
+			return "", ErrProtected
+		}
+	}
+	return p, nil
+}
+
+func (g Guard) authorizeWithRoot(path string, write, allowRoot bool) (string, error) {
+	p := filepath.Clean(path)
+	root := ""
+	for _, candidate := range g.Roots {
+		canonical, err := resolve(candidate)
+		if err != nil {
+			return "", fmt.Errorf("resolve allowed root: %w", err)
+		}
+		if within(p, canonical) {
+			root = canonical
+			break
+		}
+	}
+	if root == "" {
+		return "", ErrOutside
+	}
+	if write && !allowRoot && samePath(p, root) {
 		return "", ErrRoot
 	}
 	if write {
@@ -132,7 +283,7 @@ func lexicalName(part string) error {
 	if part == "" {
 		return nil
 	}
-	if part == "." || part == ".." || strings.TrimRight(part, ". ") != part || reserved(part) {
+	if part == "." || part == ".." || strings.ContainsAny(part, `\\/`) || strings.TrimRight(part, ". ") != part || reserved(part) {
 		return ErrInvalid
 	}
 	for _, r := range part {

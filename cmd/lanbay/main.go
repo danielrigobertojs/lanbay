@@ -16,6 +16,7 @@ import (
 
 	"github.com/danielrigobertojs/lanbay/internal/config"
 	"github.com/danielrigobertojs/lanbay/internal/license"
+	"github.com/danielrigobertojs/lanbay/internal/platform"
 	"github.com/danielrigobertojs/lanbay/internal/server"
 	"github.com/danielrigobertojs/lanbay/internal/store"
 	"github.com/danielrigobertojs/lanbay/internal/volumes"
@@ -34,6 +35,11 @@ func main() {
 	c, err := config.Load(config.DefaultDataDir())
 	if err != nil {
 		fatal(err)
+	}
+	if err := platform.EnforceRedirectionTrust(); err != nil {
+		slog.Warn("No se pudo activar ProcessRedirectionTrustPolicy; pathguard mantiene validación por handles", "error", err)
+	} else {
+		slog.Info("ProcessRedirectionTrustPolicy activada")
 	}
 	if _, err := server.EnsureCertificate(c.CertificateFile, c.KeyFile); err != nil {
 		fatal(err)
