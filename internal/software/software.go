@@ -107,8 +107,9 @@ func (d *disabledBackend) ListUpgrades(context.Context) ([]Update, error) {
 	return nil, ErrDisabled
 }
 
-func NewBackend() Backend                      { return newBackend() }
-func NewDisabledBackend(reason string) Backend { return &disabledBackend{reason: reason} }
+func NewBackend() Backend                          { return newBackendWithDataDir("") }
+func NewBackendWithDataDir(dataDir string) Backend { return newBackendWithDataDir(dataDir) }
+func NewDisabledBackend(reason string) Backend     { return &disabledBackend{reason: reason} }
 
 type Registry struct {
 	db *sql.DB

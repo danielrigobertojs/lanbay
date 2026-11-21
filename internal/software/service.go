@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"sync"
 	"time"
 
@@ -21,6 +22,51 @@ type Service struct {
 	mu             sync.Mutex
 	restartPending bool
 	installMu      sync.Mutex
+}
+
+var wingetIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
+
+func validateWingetID(id string) error {
+	if !wingetIDPattern.MatchString(id) {
+		return fmt.Errorf("id de winget inválido")
+	}
+	return nil
+}
+
+func validateSearchQuery(q string) error {
+	if len(q) > 128 {
+		return fmt.Errorf("búsqueda demasiado larga")
+	}
+	if len(q) > 0 && q[0] == '-' {
+		return fmt.Errorf("búsqueda inválida")
+	}
+	for _, r := range q {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("búsqueda inválida")
+		}
+	}
+	return nil
+}
+
+// DecideInstalled interprets winget list output per S4.
+func DecideInstalled(code int, out string, id string) (bool, error) {
+	const notInstalledCode = 0x8A150014
+	if code == notInstalledCode {
+		return false, nil
+	}
+	if code != 0 {
+		return false, fmt.Errorf("winget list exited 0x%X", code)
+	}
+	res, err := ParseInstalledList(out)
+	if err != nil {
+		return false, err
+	}
+	for _, r := range res {
+		if r.ID == id {
+			return true, nil
+		}
+	}
+	return false, fmt.Errorf("winget list did not report an exact match")
 }
 
 func NewService(db *sql.DB, backend Backend, jm *jobs.Manager, dataDir string) (*Service, error) {
@@ -47,6 +93,9 @@ func (s *Service) List(ctx context.Context) ([]ManagedApp, error) {
 }
 
 func (s *Service) Search(ctx context.Context, query string) ([]SearchResult, error) {
+	if err := validateSearchQuery(query); err != nil {
+		return nil, err
+	}
 	return s.Backend.Search(ctx, query)
 }
 
@@ -80,13 +129,13 @@ func (s *Service) findSearchResult(ctx context.Context, id string) (SearchResult
 			return r, true
 		}
 	}
-	if len(res) > 0 {
-		return res[0], true
-	}
 	return SearchResult{}, false
 }
 
 func (s *Service) InstallWinget(ctx context.Context, wingetID string) (string, error) {
+	if err := validateWingetID(wingetID); err != nil {
+		return "", err
+	}
 	s.installMu.Lock()
 	defer s.installMu.Unlock()
 	if !s.Backend.Available() {
@@ -187,6 +236,12 @@ func (s *Service) Upgrade(ctx context.Context, managedID string) (string, error)
 	if app.Source != SourceWinget {
 		return "", ErrNotManaged
 	}
+	if app.Status != StatusInstalled {
+		return "", fmt.Errorf("la aplicación no está instalada")
+	}
+	if err := validateWingetID(app.WingetID); err != nil {
+		return "", err
+	}
 	if !s.Backend.Available() {
 		return "", ErrUnavailable
 	}
@@ -231,6 +286,12 @@ func (s *Service) Uninstall(ctx context.Context, managedID string) (string, erro
 	if app.Source != SourceWinget {
 		return "", ErrNotManaged
 	}
+	if app.Status != StatusInstalled {
+		return "", fmt.Errorf("la aplicación no está instalada")
+	}
+	if err := validateWingetID(app.WingetID); err != nil {
+		return "", err
+	}
 	if !s.Backend.Available() {
 		return "", ErrUnavailable
 	}
@@ -265,16 +326,23 @@ func (s *Service) Remove(ctx context.Context, managedID string) error {
 }
 
 type jobLogWriter struct {
-	jobs *jobs.Manager
-	id   string
-	ctx  context.Context
-	buf  []byte
+	jobs    *jobs.Manager
+	id      string
+	ctx     context.Context
+	written int
 }
 
 func (w *jobLogWriter) Write(p []byte) (int, error) {
-	w.buf = append(w.buf, p...)
-	if w.jobs != nil {
-		_, _ = w.jobs.Update(w.ctx, w.id, jobs.Running, -1, "en curso", string(p))
+	if w.written < (1 << 20) {
+		remaining := (1 << 20) - w.written
+		chunk := p
+		if len(chunk) > remaining {
+			chunk = chunk[:remaining]
+		}
+		if w.jobs != nil && len(chunk) > 0 {
+			_, _ = w.jobs.Update(w.ctx, w.id, jobs.Running, -1, "en curso", string(chunk))
+		}
+		w.written += len(p)
 	}
 	return len(p), nil
 }

@@ -631,6 +631,9 @@ func (s *Server) softwareSearch(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, software.ErrDisabled) || errors.Is(err, software.ErrUnavailable) {
 			code = http.StatusServiceUnavailable
 		}
+		if errors.Is(err, software.ErrNotFound) {
+			code = http.StatusNotFound
+		}
 		http.Error(w, err.Error(), code)
 		return
 	}
@@ -648,6 +651,7 @@ func (s *Server) softwareInstall(w http.ResponseWriter, r *http.Request) {
 		Source string `json:"source"`
 		ID     string `json:"id"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		http.Error(w, "solicitud inválida", 400)
 		return
@@ -667,9 +671,13 @@ func (s *Server) softwareInstall(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, software.ErrDisabled) || errors.Is(err, software.ErrUnavailable) {
 			code = http.StatusServiceUnavailable
 		}
+		if errors.Is(err, software.ErrNotFound) {
+			code = http.StatusNotFound
+		}
 		http.Error(w, err.Error(), code)
 		return
 	}
+	s.audit(r, "software_install:"+id, "ok")
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]string{"job_id": jobID})
 }
@@ -686,6 +694,9 @@ func (s *Server) softwareUpdates(w http.ResponseWriter, r *http.Request) {
 		code := http.StatusBadRequest
 		if errors.Is(err, software.ErrDisabled) || errors.Is(err, software.ErrUnavailable) {
 			code = http.StatusServiceUnavailable
+		}
+		if errors.Is(err, software.ErrNotFound) {
+			code = http.StatusNotFound
 		}
 		http.Error(w, err.Error(), code)
 		return
@@ -707,9 +718,13 @@ func (s *Server) softwareUpgrade(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, software.ErrDisabled) || errors.Is(err, software.ErrUnavailable) {
 			code = http.StatusServiceUnavailable
 		}
+		if errors.Is(err, software.ErrNotFound) {
+			code = http.StatusNotFound
+		}
 		http.Error(w, err.Error(), code)
 		return
 	}
+	s.audit(r, "software_upgrade:"+id, "ok")
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]string{"job_id": jobID})
 }
@@ -728,9 +743,13 @@ func (s *Server) softwareUninstall(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, software.ErrDisabled) || errors.Is(err, software.ErrUnavailable) {
 			code = http.StatusServiceUnavailable
 		}
+		if errors.Is(err, software.ErrNotFound) {
+			code = http.StatusNotFound
+		}
 		http.Error(w, err.Error(), code)
 		return
 	}
+	s.audit(r, "software_uninstall:"+id, "ok")
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]string{"job_id": jobID})
 }
