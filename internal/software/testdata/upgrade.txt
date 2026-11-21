@@ -1,0 +1,5 @@
+Name  Id           Version  Available  Source
+---------------------------------------------
+7-Zip 7zip.7zip    24.00    25.00      winget
+
+1 upgrades available.

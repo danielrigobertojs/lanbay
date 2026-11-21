@@ -18,6 +18,7 @@ import (
 	"github.com/danielrigobertojs/lanbay/internal/license"
 	"github.com/danielrigobertojs/lanbay/internal/platform"
 	"github.com/danielrigobertojs/lanbay/internal/server"
+	"github.com/danielrigobertojs/lanbay/internal/software"
 	"github.com/danielrigobertojs/lanbay/internal/store"
 	"github.com/danielrigobertojs/lanbay/internal/volumes"
 	"golang.org/x/term"
@@ -53,6 +54,12 @@ func main() {
 	}
 	defer db.Close()
 	app := server.New(c, db, volumes.NewProvider(), version)
+	sw, err := software.NewService(db, software.NewBackend(), app.Jobs(), c.DataDir)
+	if err != nil {
+		fatal(err)
+	}
+	app.SetSoftware(sw)
+	_ = sw.Reconcile(ctx)
 	if len(args) > 0 && args[0] == "set-password" {
 		if len(args) != 1 || !term.IsTerminal(int(os.Stdin.Fd())) {
 			fatal(errors.New("uso: lanbay set-password requiere una consola interactiva"))

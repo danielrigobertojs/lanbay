@@ -14,6 +14,7 @@ import (
 	"github.com/danielrigobertojs/lanbay/internal/jobs"
 	"github.com/danielrigobertojs/lanbay/internal/pathguard"
 	"github.com/danielrigobertojs/lanbay/internal/platform"
+	"github.com/danielrigobertojs/lanbay/internal/software"
 	"github.com/danielrigobertojs/lanbay/internal/uploads"
 	"github.com/danielrigobertojs/lanbay/internal/volumes"
 	lanbayweb "github.com/danielrigobertojs/lanbay/internal/web"
@@ -31,14 +32,15 @@ import (
 )
 
 type Server struct {
-	config  config.Config
-	auth    *auth.Manager
-	volumes volumes.Provider
-	db      *sql.DB
-	version string
-	auditMu sync.Mutex
-	jobs    *jobs.Manager
-	uploads *uploads.Manager
+	config   config.Config
+	auth     *auth.Manager
+	volumes  volumes.Provider
+	db       *sql.DB
+	version  string
+	auditMu  sync.Mutex
+	jobs     *jobs.Manager
+	uploads  *uploads.Manager
+	software *software.Service
 }
 
 func New(c config.Config, db *sql.DB, provider volumes.Provider, version string) *Server {
@@ -51,6 +53,8 @@ func New(c config.Config, db *sql.DB, provider volumes.Provider, version string)
 	}
 	return s
 }
+func (s *Server) SetSoftware(svc *software.Service)              { s.software = svc }
+func (s *Server) Jobs() *jobs.Manager                            { return s.jobs }
 func (s *Server) Initialize(ctx context.Context) (string, error) { return s.auth.EnsurePassword(ctx) }
 func (s *Server) SetPassword(ctx context.Context, password string) error {
 	if err := s.auth.SetPassword(ctx, password); err != nil {
@@ -89,6 +93,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/uploads/{id}", s.uploadCancel)
 	mux.HandleFunc("GET /api/v1/jobs", s.jobList)
 	mux.HandleFunc("POST /api/v1/jobs/{id}/cancel", s.jobCancel)
+	mux.HandleFunc("GET /api/v1/software", s.softwareList)
+	mux.HandleFunc("GET /api/v1/software/search", s.softwareSearch)
+	mux.HandleFunc("POST /api/v1/software/install", s.softwareInstall)
+	mux.HandleFunc("GET /api/v1/software/updates", s.softwareUpdates)
+	mux.HandleFunc("POST /api/v1/software/{id}/upgrade", s.softwareUpgrade)
+	mux.HandleFunc("POST /api/v1/software/{id}/uninstall", s.softwareUninstall)
 	mux.HandleFunc("GET /api/v1/events", s.events)
 	mux.Handle("GET /", lanbayweb.Handler())
 	return s.network(s.host(s.headers(s.log(mux))))
@@ -591,6 +601,119 @@ func remoteIP(r *http.Request) netip.Addr {
 	return netip.MustParseAddr(strings.Trim(host, "[]"))
 }
 func hostname() string { h, _ := os.Hostname(); return h }
+func (s *Server) softwareList(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, false) {
+		return
+	}
+	if s.software == nil {
+		http.Error(w, "software no disponible", http.StatusServiceUnavailable)
+		return
+	}
+	items, err := s.software.List(r.Context())
+	if err != nil {
+		http.Error(w, "no se pudo leer el software", 500)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"apps": items, "restart_pending": s.software.RestartPending()})
+}
+func (s *Server) softwareSearch(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, false) {
+		return
+	}
+	if s.software == nil {
+		http.Error(w, "software no disponible", http.StatusServiceUnavailable)
+		return
+	}
+	q := r.URL.Query().Get("q")
+	res, err := s.software.Search(r.Context(), q)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"results": res})
+}
+func (s *Server) softwareInstall(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, true) {
+		return
+	}
+	if s.software == nil {
+		http.Error(w, "software no disponible", http.StatusServiceUnavailable)
+		return
+	}
+	var in struct {
+		Source string `json:"source"`
+		ID     string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, "solicitud inválida", 400)
+		return
+	}
+	if in.Source != "" && in.Source != string(software.SourceWinget) {
+		http.Error(w, "source no soportado en M4", 400)
+		return
+	}
+	id := in.ID
+	if id == "" {
+		http.Error(w, "id requerido", 400)
+		return
+	}
+	jobID, err := s.software.InstallWinget(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]string{"job_id": jobID})
+}
+func (s *Server) softwareUpdates(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, false) {
+		return
+	}
+	if s.software == nil {
+		http.Error(w, "software no disponible", http.StatusServiceUnavailable)
+		return
+	}
+	items, err := s.software.Updates(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"updates": items})
+}
+func (s *Server) softwareUpgrade(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, true) {
+		return
+	}
+	if s.software == nil {
+		http.Error(w, "software no disponible", http.StatusServiceUnavailable)
+		return
+	}
+	id := r.PathValue("id")
+	jobID, err := s.software.Upgrade(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]string{"job_id": jobID})
+}
+func (s *Server) softwareUninstall(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, true) {
+		return
+	}
+	if s.software == nil {
+		http.Error(w, "software no disponible", http.StatusServiceUnavailable)
+		return
+	}
+	id := r.PathValue("id")
+	jobID, err := s.software.Uninstall(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]string{"job_id": jobID})
+}
 func (s *Server) audit(r *http.Request, action, result string) {
 	// SQLite accepts one writer at a time. Audit records are security evidence,
 	// so concurrent requests must not silently lose one to a busy writer.
