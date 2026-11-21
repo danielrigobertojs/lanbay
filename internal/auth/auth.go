@@ -183,9 +183,14 @@ func (m *Manager) VerifyPasswordForSession(ctx context.Context, id, password str
 	valid = ok && !revoke
 	m.mu.Unlock()
 	if revoke {
+		// The revocation must survive a client that closes the connection
+		// while the password hash is being computed: use a context detached
+		// from the request with a short timeout so the DELETE reaches SQLite.
+		revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
 		// Keep the revoked marker after deleting the durable session so every
 		// request that already passed HTTP authentication still fails closed.
-		if _, err := m.db.ExecContext(ctx, "DELETE FROM sessions WHERE token_hash=?", key); err != nil {
+		if _, err := m.db.ExecContext(revokeCtx, "DELETE FROM sessions WHERE token_hash=?", key); err != nil {
 			slog.Error("revoke password-change session", "error", err)
 			return false, failed, fmt.Errorf("revoke password-change session: %w", err)
 		}

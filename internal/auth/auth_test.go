@@ -186,6 +186,28 @@ func TestChangePasswordForSessionRequiresExistingSession(t *testing.T) {
 	}
 }
 
+func TestVerifyPasswordForSessionRevokesWithCanceledContext(t *testing.T) {
+	m := manager(t)
+	if err := m.SetPassword(context.Background(), "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	id, _, _, err := m.Login(context.Background(), netip.MustParseAddr("10.0.0.8"), "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < 5; i++ {
+		if _, _, err := m.VerifyPasswordForSession(ctx, id, "wrong password value"); err != nil {
+			t.Fatalf("iteration %d: %v", i, err)
+		}
+	}
+	var sessions int
+	if err := m.db.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&sessions); err != nil || sessions != 0 {
+		t.Fatalf("sessions=%d err=%v", sessions, err)
+	}
+}
+
 func TestIPv6AttemptsShare64AndCleanup(t *testing.T) {
 	m := manager(t)
 	if attemptKey(netip.MustParseAddr("fd00::1")) != attemptKey(netip.MustParseAddr("fd00::2")) {
