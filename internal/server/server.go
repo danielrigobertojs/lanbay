@@ -594,9 +594,12 @@ func hostname() string { h, _ := os.Hostname(); return h }
 func (s *Server) audit(r *http.Request, action, result string) {
 	// SQLite accepts one writer at a time. Audit records are security evidence,
 	// so concurrent requests must not silently lose one to a busy writer.
+	// Use a context detached from the request so a client that closes the
+	// connection does not drop the audit INSERT.
 	s.auditMu.Lock()
 	defer s.auditMu.Unlock()
-	if _, err := s.db.ExecContext(r.Context(), "INSERT INTO audit_log(created_at,ip,action,result) VALUES(?,?,?,?)", time.Now().UTC().Format(time.RFC3339), remoteIP(r).String(), action, result); err != nil {
+	ctx := context.WithoutCancel(r.Context())
+	if _, err := s.db.ExecContext(ctx, "INSERT INTO audit_log(created_at,ip,action,result) VALUES(?,?,?,?)", time.Now().UTC().Format(time.RFC3339), remoteIP(r).String(), action, result); err != nil {
 		slog.Error("write audit record", "action", action, "result", result, "error", err)
 	}
 }
