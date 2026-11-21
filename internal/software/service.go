@@ -4,8 +4,12 @@ package software
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +26,9 @@ type Service struct {
 	mu             sync.Mutex
 	restartPending bool
 	installMu      sync.Mutex
+
+	pendingMu      sync.Mutex
+	pendingChoices map[string][]UninstallEntry
 }
 
 var wingetIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
@@ -73,7 +80,7 @@ func NewService(db *sql.DB, backend Backend, jm *jobs.Manager, dataDir string) (
 	if err := EnsureSchema(context.Background(), db); err != nil {
 		return nil, err
 	}
-	return &Service{db: db, Registry: NewRegistry(db), Backend: backend, Jobs: jm, DataDir: dataDir}, nil
+	return &Service{db: db, Registry: NewRegistry(db), Backend: backend, Jobs: jm, DataDir: dataDir, pendingChoices: map[string][]UninstallEntry{}}, nil
 }
 
 func (s *Service) RestartPending() bool {
@@ -283,6 +290,9 @@ func (s *Service) Uninstall(ctx context.Context, managedID string) (string, erro
 	if err != nil {
 		return "", err
 	}
+	if app.Source == SourceUpload {
+		return s.UninstallUploaded(ctx, managedID)
+	}
 	if app.Source != SourceWinget {
 		return "", ErrNotManaged
 	}
@@ -345,4 +355,239 @@ func (w *jobLogWriter) Write(p []byte) (int, error) {
 		w.written += len(p)
 	}
 	return len(p), nil
+}
+
+func (s *Service) StagingDir() string {
+	return filepath.Join(s.DataDir, "staging")
+}
+
+func (s *Service) InspectInstaller(path string) (InstallerInfo, error) {
+	return InspectInstaller(path)
+}
+
+func (s *Service) PendingInstallChoices(jobID string) []UninstallEntry {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	out := make([]UninstallEntry, len(s.pendingChoices[jobID]))
+	copy(out, s.pendingChoices[jobID])
+	return out
+}
+
+func (s *Service) ConfirmInstalled(ctx context.Context, jobID string, chosen []string, keep bool) error {
+	s.pendingMu.Lock()
+	choices := s.pendingChoices[jobID]
+	delete(s.pendingChoices, jobID)
+	s.pendingMu.Unlock()
+	allowed := map[string]bool{}
+	for _, c := range choices {
+		allowed[c.Key] = true
+	}
+	var selected []UninstallEntry
+	for _, k := range chosen {
+		for _, c := range choices {
+			if c.Key == k && allowed[k] {
+				selected = append(selected, c)
+			}
+		}
+	}
+	if len(selected) == 0 {
+		return fmt.Errorf("no se seleccionaron entradas nuevas")
+	}
+	// Register first selected entry as the managed app.
+	e := selected[0]
+	id := "upload:" + e.Key
+	now := time.Now().UTC().Format(time.RFC3339)
+	uninstallInfo := e.Key
+	if e.ProductCode != "" {
+		uninstallInfo = "msi:" + e.ProductCode
+	}
+	b, _ := json.Marshal(e)
+	if len(b) > 0 {
+		uninstallInfo = string(b)
+	}
+	return s.Registry.Add(ctx, ManagedApp{
+		ID:            id,
+		Source:        SourceUpload,
+		DisplayName:   e.DisplayName,
+		Version:       e.DisplayVersion,
+		InstalledAt:   now,
+		InstallJobID:  jobID,
+		UninstallInfo: uninstallInfo,
+		Status:        StatusInstalled,
+	})
+}
+
+func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions) (string, error) {
+	s.installMu.Lock()
+	defer s.installMu.Unlock()
+	if !s.Backend.Available() && false {
+		// upload installers do not require winget
+	}
+	if s.Jobs == nil {
+		return "", fmt.Errorf("jobs unavailable")
+	}
+	if opts.Path == "" {
+		return "", fmt.Errorf("path requerido")
+	}
+	if _, err := os.Stat(opts.Path); err != nil {
+		return "", err
+	}
+	j, err := s.Jobs.Create(ctx, "installer-install", 0)
+	if err != nil {
+		return "", err
+	}
+	s.Jobs.Start(j, func(ctx context.Context) error {
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+		defer cancel()
+		logw := &jobLogWriter{jobs: s.Jobs, id: j.ID, ctx: ctx}
+		before, _ := SnapshotUninstallKeys(ctx)
+		ext := strings.ToLower(filepath.Ext(opts.Path))
+		var code int
+		var err error
+		if ext == ".msi" {
+			logPath := opts.Path + ".log"
+			code, _, err = runCommand(ctx, "msiexec", []string{"/i", opts.Path, "/qn", "/norestart", "/l*v", logPath}, nil, filepath.Dir(opts.Path), logw)
+		} else {
+			args := []string{}
+			if !opts.Interactive {
+				if opts.Preset != "" {
+					args = append(args, PresetArgs(opts.Preset)...)
+				}
+				args = append(args, opts.Args...)
+			} else {
+				args = append(args, opts.Args...)
+			}
+			code, _, err = runCommand(ctx, opts.Path, args, nil, filepath.Dir(opts.Path), logw)
+		}
+		if err != nil {
+			return err
+		}
+		if code != 0 && code != 3010 && code != 1641 {
+			return fmt.Errorf("instalador salió con código %d", code)
+		}
+		if code == 3010 || code == 1641 {
+			s.setRestartPending()
+		}
+		after, _ := SnapshotUninstallKeys(ctx)
+		diff := DiffUninstallKeys(before, after)
+		if len(diff) == 1 {
+			e := diff[0]
+			id := "upload:" + e.Key
+			uninstallInfo := e.Key
+			if e.ProductCode != "" {
+				uninstallInfo = "msi:" + e.ProductCode
+			}
+			b, _ := json.Marshal(e)
+			if len(b) > 0 {
+				uninstallInfo = string(b)
+			}
+			_ = s.Registry.Add(ctx, ManagedApp{
+				ID:            id,
+				Source:        SourceUpload,
+				DisplayName:   e.DisplayName,
+				Version:       e.DisplayVersion,
+				InstalledAt:   time.Now().UTC().Format(time.RFC3339),
+				InstallJobID:  j.ID,
+				UninstallInfo: uninstallInfo,
+				Status:        StatusInstalled,
+			})
+		} else if len(diff) > 1 {
+			s.pendingMu.Lock()
+			s.pendingChoices[j.ID] = diff
+			s.pendingMu.Unlock()
+			_, _ = s.Jobs.Update(ctx, j.ID, jobs.Completed, -1, "seleccione las entradas instaladas", "")
+			// prevent Start from overwriting message? Start will set completed; okay
+		} else {
+			_, _ = s.Jobs.Update(ctx, j.ID, jobs.Completed, -1, "no rastreable", "")
+		}
+		if !opts.KeepInstaller && len(diff) <= 1 {
+			_ = os.Remove(opts.Path)
+		}
+		return nil
+	})
+	return j.ID, nil
+}
+
+func (s *Service) UninstallUploaded(ctx context.Context, managedID string) (string, error) {
+	s.installMu.Lock()
+	defer s.installMu.Unlock()
+	app, err := s.Registry.Get(ctx, managedID)
+	if err != nil {
+		return "", err
+	}
+	if app.Source != SourceUpload {
+		return "", ErrNotManaged
+	}
+	if s.Jobs == nil {
+		return "", fmt.Errorf("jobs unavailable")
+	}
+	j, err := s.Jobs.Create(ctx, "installer-uninstall", 0)
+	if err != nil {
+		return "", err
+	}
+	s.Jobs.Start(j, func(ctx context.Context) error {
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+		defer cancel()
+		logw := &jobLogWriter{jobs: s.Jobs, id: j.ID, ctx: ctx}
+		// parse uninstall info
+		var entry UninstallEntry
+		_ = json.Unmarshal([]byte(app.UninstallInfo), &entry)
+		if entry.Key == "" && app.UninstallInfo != "" {
+			// could be msi: code or key
+		}
+		if strings.HasPrefix(app.UninstallInfo, "msi:") {
+			code := strings.TrimPrefix(app.UninstallInfo, "msi:")
+			c, _, err := runCommand(ctx, "msiexec", []string{"/x", code, "/qn", "/norestart"}, nil, s.StagingDir(), logw)
+			if err != nil {
+				return err
+			}
+			if c != 0 && c != 3010 && c != 1641 {
+				return fmt.Errorf("msiexec uninstall exited %d", c)
+			}
+			if c == 3010 || c == 1641 {
+				s.setRestartPending()
+			}
+		} else if entry.QuietUninstallString != "" {
+			parts := strings.Fields(entry.QuietUninstallString)
+			if len(parts) == 0 {
+				return fmt.Errorf("quiet uninstall string vacío")
+			}
+			exe := parts[0]
+			args := parts[1:]
+			c, _, err := runCommand(ctx, exe, args, nil, s.StagingDir(), logw)
+			if err != nil {
+				return err
+			}
+			if c != 0 && c != 3010 && c != 1641 {
+				return fmt.Errorf("uninstall exited %d", c)
+			}
+		} else if entry.UninstallString != "" {
+			parts := strings.Fields(entry.UninstallString)
+			if len(parts) == 0 {
+				return fmt.Errorf("uninstall string vacío")
+			}
+			exe := parts[0]
+			args := parts[1:]
+			c, _, err := runCommand(ctx, exe, args, nil, s.StagingDir(), logw)
+			if err != nil {
+				return err
+			}
+			if c != 0 && c != 3010 && c != 1641 {
+				return fmt.Errorf("uninstall exited %d", c)
+			}
+		} else if strings.HasPrefix(app.UninstallInfo, "{") {
+			code := app.UninstallInfo
+			c, _, err := runCommand(ctx, "msiexec", []string{"/x", code, "/qn", "/norestart"}, nil, s.StagingDir(), logw)
+			if err != nil {
+				return err
+			}
+			if c != 0 && c != 3010 && c != 1641 {
+				return fmt.Errorf("msiexec uninstall exited %d", c)
+			}
+		} else {
+			return fmt.Errorf("sin información de desinstalación")
+		}
+		return s.Registry.UpdateStatus(ctx, managedID, StatusUninstalled)
+	})
+	return j.ID, nil
 }

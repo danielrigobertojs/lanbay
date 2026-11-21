@@ -5,10 +5,15 @@ package software
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"strings"
 )
 
 var (
@@ -186,4 +191,91 @@ func (r *Registry) UpdateVersion(ctx context.Context, id, version string) error 
 func (r *Registry) Remove(ctx context.Context, id string) error {
 	_, err := r.db.ExecContext(ctx, "DELETE FROM managed_apps WHERE id=?", id)
 	return err
+}
+
+// InstallerInfo describes an installer staged for installation.
+type InstallerInfo struct {
+	Path         string           `json:"path"`
+	Name         string           `json:"name"`
+	Size         int64            `json:"size_bytes"`
+	SHA256       string           `json:"sha256"`
+	Type         string           `json:"type"`
+	Authenticode AuthenticodeInfo `json:"authenticode"`
+}
+
+// InstallUploadOptions configures an uploaded installer job.
+type InstallUploadOptions struct {
+	Path          string   `json:"path"`
+	Preset        string   `json:"preset,omitempty"`
+	Args          []string `json:"args,omitempty"`
+	Interactive   bool     `json:"interactive,omitempty"`
+	KeepInstaller bool     `json:"keep_installer,omitempty"`
+	ChoiceKeys    []string `json:"choice_keys,omitempty"`
+}
+
+// InstallerPresets maps preset names to silent arguments.
+var InstallerPresets = map[string][]string{
+	"inno":            {"/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"},
+	"innosetup":       {"/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"},
+	"nsis":            {"/S"},
+	"installshield":   {"/s"},
+	"installshield-s": {"/s"},
+	"wix":             {"/quiet", "/norestart"},
+	"wixburn":         {"/quiet", "/norestart"},
+	"burn":            {"/quiet", "/norestart"},
+}
+
+func PresetArgs(preset string) []string {
+	if v, ok := InstallerPresets[preset]; ok {
+		out := make([]string, len(v))
+		copy(out, v)
+		return out
+	}
+	return nil
+}
+
+func SHA256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func InspectInstaller(path string) (InstallerInfo, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return InstallerInfo{}, err
+	}
+	hash, err := SHA256File(path)
+	if err != nil {
+		return InstallerInfo{}, err
+	}
+	info := InstallerInfo{
+		Path:   path,
+		Name:   fi.Name(),
+		Size:   fi.Size(),
+		SHA256: hash,
+		Type:   installerType(path),
+	}
+	ai, _ := VerifyAuthenticode(context.Background(), path)
+	info.Authenticode = ai
+	return info, nil
+}
+
+func installerType(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".msi":
+		return "msi"
+	case ".exe":
+		return "exe"
+	default:
+		return ext
+	}
 }
