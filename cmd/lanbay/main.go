@@ -59,7 +59,20 @@ func main() {
 		fatal(err)
 	}
 	app.SetSoftware(sw)
-	_ = sw.Reconcile(ctx)
+	go func() {
+		rctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		_ = sw.Reconcile(rctx)
+		cancel()
+	}()
+	go func() {
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			rctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			_ = sw.Reconcile(rctx)
+			cancel()
+		}
+	}()
 	if len(args) > 0 && args[0] == "set-password" {
 		if len(args) != 1 || !term.IsTerminal(int(os.Stdin.Fd())) {
 			fatal(errors.New("uso: lanbay set-password requiere una consola interactiva"))

@@ -52,6 +52,16 @@ func TestDecideInstalled(t *testing.T) {
 	if ok || err == nil {
 		t.Fatalf("expected reject got %v,%v", ok, err)
 	}
+	// truncated id -> reject
+	ok, err = DecideInstalled(0, out, "7zip.7zi")
+	if ok || err == nil {
+		t.Fatalf("expected reject got %v,%v", ok, err)
+	}
+	// unrecognized output -> reject
+	ok, err = DecideInstalled(0, "this is not winget output", "7zip.7zip")
+	if ok || err == nil {
+		t.Fatalf("expected reject got %v,%v", ok, err)
+	}
 }
 
 func TestValidateSearchQuery(t *testing.T) {

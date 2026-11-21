@@ -32,11 +32,13 @@ func runCommand(ctx context.Context, path string, args []string, env []string, d
 	job, jerr := newJobObject()
 	if jerr != nil {
 		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 		return 0, buf.Bytes(), fmt.Errorf("create job object: %w", jerr)
 	}
 	if err := job.assign(uint32(cmd.Process.Pid)); err != nil {
 		job.close()
 		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 		return 0, buf.Bytes(), fmt.Errorf("assign job object: %w", err)
 	}
 	// Resume the suspended primary thread(s) now that the process is in the job.
@@ -44,6 +46,7 @@ func runCommand(ctx context.Context, path string, args []string, env []string, d
 	if !resumed {
 		job.close()
 		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 		return 0, buf.Bytes(), fmt.Errorf("no se pudo reanudar el proceso")
 	}
 

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -37,7 +38,7 @@ func newBackendWithDataDir(dataDir string) Backend {
 	} else if pd := os.Getenv("ProgramData"); pd != "" {
 		tempRoot = filepath.Join(pd, "Lanbay", "tmp")
 	} else {
-		tempRoot = filepath.Join(os.TempDir(), "Lanbay", "tmp")
+		return NewDisabledBackend("directorio temporal seguro no disponible")
 	}
 	b := &wingetBackend{tempRoot: tempRoot, dataDir: dataDir}
 	b.detect()
@@ -222,6 +223,8 @@ func (b *wingetBackend) newJobTemp() (string, error) {
 }
 
 func (b *wingetBackend) Search(ctx context.Context, query string) ([]SearchResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
 	if !b.avail {
 		return nil, ErrUnavailable
 	}
@@ -230,7 +233,7 @@ func (b *wingetBackend) Search(ctx context.Context, query string) ([]SearchResul
 		return nil, err
 	}
 	defer os.RemoveAll(jobTemp)
-	code, out, err := runCommand(ctx, b.path, []string{"search", "--query", query, "--source", "winget"}, b.env(jobTemp), jobTemp, io.Discard)
+	code, out, err := runCommand(ctx, b.path, []string{"search", "--query", query, "--source", "winget", "--accept-source-agreements", "--disable-interactivity"}, b.env(jobTemp), jobTemp, io.Discard)
 	_ = code
 	if err != nil && len(out) == 0 {
 		return nil, err
@@ -243,6 +246,8 @@ func (b *wingetBackend) Search(ctx context.Context, query string) ([]SearchResul
 }
 
 func (b *wingetBackend) IsInstalled(ctx context.Context, id string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
 	if !b.avail {
 		return false, ErrUnavailable
 	}
@@ -251,7 +256,7 @@ func (b *wingetBackend) IsInstalled(ctx context.Context, id string) (bool, error
 		return false, err
 	}
 	defer os.RemoveAll(jobTemp)
-	code, out, err := runCommand(ctx, b.path, []string{"list", "--id", id, "--exact"}, b.env(jobTemp), jobTemp, io.Discard)
+	code, out, err := runCommand(ctx, b.path, []string{"list", "--id", id, "--exact", "--accept-source-agreements", "--disable-interactivity"}, b.env(jobTemp), jobTemp, io.Discard)
 	if err != nil {
 		return false, err
 	}
@@ -309,6 +314,8 @@ func (b *wingetBackend) Uninstall(ctx context.Context, id string, out io.Writer)
 }
 
 func (b *wingetBackend) ListUpgrades(ctx context.Context) ([]Update, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
 	if !b.avail {
 		return nil, ErrUnavailable
 	}
@@ -317,7 +324,7 @@ func (b *wingetBackend) ListUpgrades(ctx context.Context) ([]Update, error) {
 		return nil, err
 	}
 	defer os.RemoveAll(jobTemp)
-	_, out, err := runCommand(ctx, b.path, []string{"upgrade"}, b.env(jobTemp), jobTemp, io.Discard)
+	_, out, err := runCommand(ctx, b.path, []string{"upgrade", "--accept-source-agreements", "--disable-interactivity"}, b.env(jobTemp), jobTemp, io.Discard)
 	if err != nil && len(out) == 0 {
 		return nil, err
 	}
