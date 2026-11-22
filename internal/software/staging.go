@@ -228,3 +228,33 @@ func StageInstallerStream(stagingDir, originalName string, r interface{ Read([]b
 	}
 	return finalName, nil
 }
+
+// InspectInstallerHandle is like InspectInstaller but computes SHA-256 from an
+// already-retained handle, closing the TOCTOU window (INS-2).
+func InspectInstallerHandle(f *os.File) (InstallerInfo, error) {
+	fi, err := f.Stat()
+	if err != nil {
+		return InstallerInfo{}, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return InstallerInfo{}, err
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return InstallerInfo{}, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return InstallerInfo{}, err
+	}
+	path := f.Name()
+	info := InstallerInfo{
+		Path:   path,
+		Name:   fi.Name(),
+		Size:   fi.Size(),
+		SHA256: hex.EncodeToString(h.Sum(nil)),
+		Type:   installerType(path),
+	}
+	ai, _ := VerifyAuthenticode(context.Background(), path)
+	info.Authenticode = ai
+	return info, nil
+}

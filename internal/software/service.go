@@ -492,7 +492,7 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 			return err
 		}
 		defer retained.Close()
-		info, err := InspectInstaller(opts.Path)
+		info, err := InspectInstallerHandle(retained)
 		if err != nil {
 			retained.Close()
 			return err
