@@ -492,7 +492,7 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 			return err
 		}
 		defer retained.Close()
-		info, err := InspectInstaller(opts.Path)
+		info, err := InspectInstallerHandle(retained)
 		if err != nil {
 			retained.Close()
 			return err
@@ -500,12 +500,12 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 		if info.Authenticode.Signed && !info.Authenticode.Valid {
 			return fmt.Errorf("firma Authenticode inválida o manipulada")
 		}
-		if info.Authenticode.Status != "Valid" && info.Authenticode.Status != "Unsigned" && !info.Authenticode.Signed {
+		if info.Authenticode.Status != "Valid" && info.Authenticode.Status != "Unsigned" && info.Authenticode.Status != "RevocationUnchecked" && !info.Authenticode.Signed {
 			return fmt.Errorf("estado Authenticode desconocido o no verificable")
 		}
-		if !info.Authenticode.Signed {
+		if info.Authenticode.Status == "Unsigned" || info.Authenticode.Status == "RevocationUnchecked" {
 			if !opts.ConfirmUnsigned {
-				return fmt.Errorf("instalador sin firma: confirmación requerida")
+				return fmt.Errorf("instalador sin firma o revocación no comprobable: confirmación requerida")
 			}
 			if opts.ConfirmName == "" || opts.ConfirmName != filepath.Base(opts.Path) {
 				return fmt.Errorf("confirmación de nombre incorrecta")
@@ -607,6 +607,59 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string, confi
 	if app.Source != SourceUpload {
 		return "", ErrNotManaged
 	}
+	// INS-5: confirmation check before creating the job (synchronous).
+	var entry UninstallEntry
+	_ = json.Unmarshal([]byte(app.UninstallInfo), &entry)
+	userProfile := os.Getenv("USERPROFILE")
+	requiresConfirm := entry.Root == "HKCU"
+	if !requiresConfirm && (entry.QuietUninstallString != "" || entry.UninstallString != "") {
+		exe := ""
+		for _, cand := range []string{entry.QuietUninstallString, entry.UninstallString} {
+			parts := splitCommand(cand)
+			if len(parts) > 0 {
+				exe = parts[0]
+				break
+			}
+		}
+		if userProfile != "" && strings.HasPrefix(strings.ToLower(exe), strings.ToLower(userProfile)) {
+			requiresConfirm = true
+		}
+	}
+	if requiresConfirm && !confirm {
+		return "", fmt.Errorf("desinstalador en perfil de usuario: confirmación requerida")
+	}
+	// Resolve MSI product code first (live branch).
+	msiCode := entry.ProductCode
+	if msiCode == "" && strings.HasPrefix(app.UninstallInfo, "msi:") {
+		msiCode = strings.TrimPrefix(app.UninstallInfo, "msi:")
+	}
+	if msiCode == "" {
+		re := regexp.MustCompile(`(?i)^"?msiexec(?:\.exe)?"?\s+/[XI]\s*(\{[0-9A-Fa-f-]+\})`)
+		for _, cand := range []string{entry.QuietUninstallString, entry.UninstallString} {
+			if m := re.FindStringSubmatch(strings.TrimSpace(cand)); len(m) > 1 {
+				msiCode = m[1]
+				break
+			}
+		}
+	}
+	isMSI := msiCode != "" && regexp.MustCompile(`^\{[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}$`).MatchString(msiCode)
+	// Synchronous hash check (fail-closed) before creating the job, only for non-MSI.
+	if !isMSI {
+		for _, cand := range []string{entry.QuietUninstallString, entry.UninstallString} {
+			parts := splitCommand(cand)
+			if len(parts) == 0 {
+				continue
+			}
+			if entry.UninstallerSHA256 == "" {
+				return "", fmt.Errorf("sin hash de desinstalador: rechazado")
+			}
+			if h, err := SHA256File(parts[0]); err == nil && h != entry.UninstallerSHA256 {
+				return "", fmt.Errorf("desinstalador manipulado")
+			} else if err != nil {
+				return "", fmt.Errorf("desinstalador no verificable")
+			}
+		}
+	}
 	if s.Jobs == nil {
 		return "", fmt.Errorf("jobs unavailable")
 	}
@@ -626,25 +679,6 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string, confi
 		// parse uninstall info
 		var entry UninstallEntry
 		_ = json.Unmarshal([]byte(app.UninstallInfo), &entry)
-		// INS-5: HKCU or user-writable uninstaller requires confirmation.
-		userProfile := os.Getenv("USERPROFILE")
-		requiresConfirm := entry.Root == "HKCU"
-		if !requiresConfirm && (entry.QuietUninstallString != "" || entry.UninstallString != "") {
-			exe := ""
-			for _, cand := range []string{entry.QuietUninstallString, entry.UninstallString} {
-				parts := splitCommand(cand)
-				if len(parts) > 0 {
-					exe = parts[0]
-					break
-				}
-			}
-			if userProfile != "" && strings.HasPrefix(strings.ToLower(exe), strings.ToLower(userProfile)) {
-				requiresConfirm = true
-			}
-		}
-		if requiresConfirm && !confirm {
-			return fmt.Errorf("desinstalador en perfil de usuario: confirmación requerida")
-		}
 		if entry.Key == "" && app.UninstallInfo != "" {
 			// could be msi: code or key
 		}

@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -56,23 +55,9 @@ func TestUninstallUploadedHashMismatch(t *testing.T) {
 	if err := svc.Registry.Add(ctx, ManagedApp{ID: "u1", Source: SourceUpload, DisplayName: "App", InstalledAt: "now", UninstallInfo: string(b), Status: StatusInstalled}); err != nil {
 		t.Fatal(err)
 	}
-	jobID, err := svc.UninstallUploaded(ctx, "u1", false)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := svc.UninstallUploaded(ctx, "u1", false); err == nil || !strings.Contains(err.Error(), "manipulado") {
+		t.Fatalf("expected hash mismatch error, got %v", err)
 	}
-	for i := 0; i < 50; i++ {
-		j, _ := svc.Jobs.Get(ctx, jobID)
-		if j.State == jobs.Failed || j.State == jobs.Completed || j.State == jobs.Canceled {
-			if j.State != jobs.Failed {
-				t.Fatalf("expected failed, got %s: %s", j.State, j.Message)
-			}
-			return
-		}
-		// small sleep
-		time.Sleep(10 * time.Millisecond)
-		_ = i
-	}
-	t.Fatal("timeout")
 }
 
 func TestUninstallUploadedHKCUConfirm(t *testing.T) {
@@ -83,19 +68,7 @@ func TestUninstallUploadedHKCUConfirm(t *testing.T) {
 	if err := svc.Registry.Add(ctx, ManagedApp{ID: "u2", Source: SourceUpload, DisplayName: "App", InstalledAt: "now", UninstallInfo: string(b), Status: StatusInstalled}); err != nil {
 		t.Fatal(err)
 	}
-	jobID, err := svc.UninstallUploaded(ctx, "u2", false)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := svc.UninstallUploaded(ctx, "u2", false); err == nil || !strings.Contains(err.Error(), "confirmación") {
+		t.Fatalf("expected confirm error, got %v", err)
 	}
-	for i := 0; i < 50; i++ {
-		j, _ := svc.Jobs.Get(ctx, jobID)
-		if j.State == jobs.Failed || j.State == jobs.Completed || j.State == jobs.Canceled {
-			if j.State != jobs.Failed || !strings.Contains(j.Log, "confirmación") {
-				t.Fatalf("expected confirm error, got %s: %s", j.State, j.Message)
-			}
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("timeout")
 }

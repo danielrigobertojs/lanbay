@@ -6,9 +6,16 @@ package software
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"path/filepath"
 	"os/exec"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
+
+const trustENoSignature = 0x800B0100
 
 // AuthenticodeInfo summarizes the Authenticode signature of a file.
 type AuthenticodeInfo struct {
@@ -19,16 +26,116 @@ type AuthenticodeInfo struct {
 	Message string `json:"message,omitempty"`
 }
 
+// VerifyAuthenticode verifies the Authenticode signature of the file at path.
+// It retains a shared-read handle and verifies over that handle (INS-2).
 func VerifyAuthenticode(ctx context.Context, path string) (AuthenticodeInfo, error) {
-	if _, err := os.Stat(path); err != nil {
+	f, err := openRetained(path)
+	if err != nil {
 		return AuthenticodeInfo{}, err
 	}
-	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+	defer f.Close()
+	return VerifyAuthenticodeHandle(ctx, f)
+}
+
+// WinVerifyTrust is an alias kept for compatibility.
+func WinVerifyTrust(path string) (AuthenticodeInfo, error) {
+	return VerifyAuthenticode(context.Background(), path)
+}
+
+// VerifyAuthenticodeHandle verifies the Authenticode signature using an already
+// retained file handle, closing the TOCTOU window (INS-2).
+func VerifyAuthenticodeHandle(ctx context.Context, f *os.File) (AuthenticodeInfo, error) {
+	if f == nil {
+		return AuthenticodeInfo{}, errors.New("nil file")
+	}
+	if _, err := f.Stat(); err != nil {
+		return AuthenticodeInfo{}, err
+	}
+
+	handle := windows.Handle(f.Fd())
+	fileInfo := windows.WinTrustFileInfo{
+		Size: uint32(unsafe.Sizeof(windows.WinTrustFileInfo{})),
+		File: handle,
+	}
+	if p, err := windows.UTF16PtrFromString(f.Name()); err == nil {
+		fileInfo.FilePath = p
+	}
+
+	wtData := windows.WinTrustData{
+		Size:                            uint32(unsafe.Sizeof(windows.WinTrustData{})),
+		UIChoice:                        windows.WTD_UI_NONE,
+		RevocationChecks:                windows.WTD_REVOKE_WHOLECHAIN,
+		UnionChoice:                     windows.WTD_CHOICE_FILE,
+		FileOrCatalogOrBlobOrSgnrOrCert: unsafe.Pointer(&fileInfo),
+		StateAction:                     windows.WTD_STATEACTION_VERIFY,
+		ProvFlags:                       windows.WTD_CACHE_ONLY_URL_RETRIEVAL,
+	}
+	ret := windows.WinVerifyTrustEx(0, &windows.WINTRUST_ACTION_GENERIC_VERIFY_V2, &wtData)
+
+	wtData.StateAction = windows.WTD_STATEACTION_CLOSE
+	windows.WinVerifyTrustEx(0, &windows.WINTRUST_ACTION_GENERIC_VERIFY_V2, &wtData)
+
+	info := AuthenticodeInfo{}
+	switch {
+	case ret == nil:
+		info.Signed = true
+		info.Valid = true
+		info.Status = "Valid"
+	case int(ret.(windows.Errno)) == trustENoSignature:
+		info.Signed = false
+		info.Valid = false
+		info.Status = "Unsigned"
+	default:
+		hr := int(ret.(windows.Errno))
+		switch hr {
+		case 0x800B010E, 0x80092013, 0x80092012: // revocation unchecked
+			info.Signed = true
+			info.Valid = false
+			info.Status = "RevocationUnchecked"
+			info.Message = ret.Error()
+		default:
+			info.Signed = true
+			info.Valid = false
+			info.Status = "Invalid"
+			info.Message = ret.Error()
+		}
+	}
+
+	// Best-effort signer extraction via PowerShell.
+	psInfo, err := verifyAuthenticodePowerShell(ctx, f.Name())
+	if err == nil {
+		if psInfo.Signer != "" {
+			info.Signer = psInfo.Signer
+		}
+		if psInfo.Message != "" && info.Message == "" {
+			info.Message = psInfo.Message
+		}
+		if info.Status == "Invalid" && psInfo.Status != "" {
+			info.Status = psInfo.Status
+		}
+		if psInfo.Status == "Unsigned" {
+			info.Signed = false
+			info.Valid = false
+			info.Status = "Unsigned"
+		}
+	}
+	if info.Status == "" {
+		info.Status = "Unknown"
+	}
+	return info, nil
+}
+
+func verifyAuthenticodePowerShell(ctx context.Context, path string) (AuthenticodeInfo, error) {
+	ps := filepath.Join(systemDirectory(), "WindowsPowerShell", "v1.0", "powershell.exe")
+	if _, err := os.Stat(ps); err != nil {
+		ps = "powershell"
+	}
+	cmd := exec.CommandContext(ctx, ps, "-NoProfile", "-NonInteractive", "-Command",
 		"Get-AuthenticodeSignature -FilePath $env:LANBAY_FILE | Select-Object Status, StatusMessage, @{Name='Signer';Expression={$_.SignerCertificate.Subject}} | ConvertTo-Json -Compress")
 	cmd.Env = append(os.Environ(), "LANBAY_FILE="+path)
 	out, err := cmd.Output()
 	if err != nil {
-		return AuthenticodeInfo{Status: "unknown", Message: err.Error()}, nil
+		return AuthenticodeInfo{}, err
 	}
 	var raw struct {
 		Status        string `json:"Status"`
@@ -36,7 +143,6 @@ func VerifyAuthenticode(ctx context.Context, path string) (AuthenticodeInfo, err
 		Signer        string `json:"Signer"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
-		// PowerShell may return an array; try array.
 		var arr []map[string]any
 		if err2 := json.Unmarshal(out, &arr); err2 == nil && len(arr) > 0 {
 			if v, ok := arr[0]["Status"].(string); ok {
@@ -49,7 +155,7 @@ func VerifyAuthenticode(ctx context.Context, path string) (AuthenticodeInfo, err
 				raw.Signer = v
 			}
 		} else {
-			return AuthenticodeInfo{Status: "unknown", Message: err.Error()}, nil
+			return AuthenticodeInfo{}, err
 		}
 	}
 	info := AuthenticodeInfo{Status: raw.Status, Message: raw.StatusMessage, Signer: raw.Signer}
@@ -62,14 +168,5 @@ func VerifyAuthenticode(ctx context.Context, path string) (AuthenticodeInfo, err
 	if info.Status == "" {
 		info.Status = "Unknown"
 	}
-	if info.Status != "Valid" && info.Signer == "" {
-		info.Status = "Unsigned"
-	}
 	return info, nil
-}
-
-// WinVerifyTrust is exposed as a helper name; implementation uses the OS
-// verification stack via PowerShell (which calls WinVerifyTrust internally).
-func WinVerifyTrust(path string) (AuthenticodeInfo, error) {
-	return VerifyAuthenticode(context.Background(), path)
 }
