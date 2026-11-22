@@ -3,11 +3,11 @@
 
 package software
 
-import "os"
+import "path/filepath"
 
 func finalPath(path string) (string, error) {
-	if _, err := os.Lstat(path); err != nil {
-		return "", err
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved, nil
 	}
 	return path, nil
 }

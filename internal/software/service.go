@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -89,7 +88,7 @@ func NewService(db *sql.DB, backend Backend, jm *jobs.Manager, dataDir string) (
 		return nil, err
 	}
 	svc := &Service{db: db, Registry: NewRegistry(db), Backend: backend, Jobs: jm, DataDir: dataDir, pendingChoices: map[string]pendingInstall{}}
-	if err := os.MkdirAll(svc.StagingDir(), 0700); err != nil {
+	if err := EnsureStagingDir(svc.StagingDir()); err != nil {
 		return nil, fmt.Errorf("create staging dir: %w", err)
 	}
 	return svc, nil
@@ -371,7 +370,7 @@ func (w *jobLogWriter) Write(p []byte) (int, error) {
 
 func (s *Service) StagingDir() string {
 	dir := filepath.Join(s.DataDir, "staging")
-	_ = os.MkdirAll(dir, 0700)
+	_ = EnsureStagingDir(dir)
 	return dir
 }
 
@@ -425,7 +424,7 @@ func (s *Service) ConfirmInstalled(ctx context.Context, jobID string, chosen []s
 		uninstallInfo = string(b)
 	}
 	if !keep && pending.path != "" {
-		_ = os.Remove(pending.path)
+		_ = RemoveStagingFile(pending.path)
 	}
 	return s.Registry.Add(ctx, ManagedApp{
 		ID:            id,
@@ -462,8 +461,8 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 		return "", err
 	}
 	opts.Path = safe
-	if _, err := os.Stat(opts.Path); err != nil {
-		return "", err
+	if !StagingFileExists(opts.Path) {
+		return "", fmt.Errorf("instalador no encontrado en staging")
 	}
 	j, err := s.Jobs.Create(ctx, "installer-install", 0)
 	if err != nil {
@@ -548,7 +547,7 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 			_, _ = s.Jobs.Update(ctx, j.ID, jobs.Completed, -1, "no rastreable", "")
 		}
 		if !opts.KeepInstaller && len(diff) <= 1 {
-			_ = os.Remove(opts.Path)
+			_ = RemoveStagingFile(opts.Path)
 		}
 		return nil
 	})

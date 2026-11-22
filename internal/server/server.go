@@ -781,12 +781,24 @@ func (s *Server) softwareInstallUploaded(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "solicitud inválida", 400)
 		return
 	}
-	if in.ReauthPassword == "" || !s.auth.VerifyPassword(r.Context(), in.ReauthPassword) {
-		http.Error(w, "re-autenticación requerida", 401)
+	cookie, _ := r.Cookie(auth.CookieName)
+	verified, failed, e := s.auth.VerifyPasswordForSession(r.Context(), cookie.Value, in.ReauthPassword)
+	if e != nil {
+		if failed {
+			s.audit(r, "installer_install", "failed")
+		}
+		http.Error(w, "no se pudo verificar la sesión", http.StatusInternalServerError)
+		return
+	}
+	if !verified {
+		if failed {
+			s.audit(r, "installer_install", "failed")
+		}
+		http.Error(w, "re-autenticación requerida", http.StatusUnauthorized)
 		return
 	}
 	jobID, err := s.software.InstallUploaded(r.Context(), software.InstallUploadOptions{
-		Path: in.Path, Name: in.Name, InstallerID: in.InstallerID, Preset: in.Preset, Args: in.Args, Interactive: in.Interactive, KeepInstaller: in.Keep, ConfirmUnsigned: in.ConfirmUnsigned, ConfirmName: in.ConfirmName, ReauthPassword: in.ReauthPassword,
+		Path: in.Path, Name: in.Name, InstallerID: in.InstallerID, Preset: in.Preset, Args: in.Args, Interactive: in.Interactive, KeepInstaller: in.Keep, ConfirmUnsigned: in.ConfirmUnsigned, ConfirmName: in.ConfirmName,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), 400)
