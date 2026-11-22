@@ -480,6 +480,8 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 		ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 		defer cancel()
 		logw := &jobLogWriter{jobs: s.Jobs, id: j.ID, ctx: ctx}
+		jobTemp, _ := JobTempDir(s.DataDir, j.ID)
+		defer RemoveAllPath(jobTemp)
 		info, err := InspectInstaller(opts.Path)
 		if err != nil {
 			return err
@@ -511,7 +513,7 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 		var code int
 		if ext == ".msi" {
 			logPath := opts.Path + ".log"
-			code, _, err = runCommand(ctx, "msiexec", []string{"/i", opts.Path, "/qn", "/norestart", "/l*v", logPath}, installerEnv(s.StagingDir()), filepath.Dir(opts.Path), logw)
+			code, _, err = runCommand(ctx, MsiexecPath(), []string{"/i", opts.Path, "/qn", "/norestart", "/l*v", logPath}, installerEnv(jobTemp), jobTemp, logw)
 		} else {
 			args := []string{}
 			if !opts.Interactive {
@@ -522,7 +524,7 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 			} else {
 				args = append(args, opts.Args...)
 			}
-			code, _, err = runCommand(ctx, opts.Path, args, installerEnv(s.StagingDir()), filepath.Dir(opts.Path), logw)
+			code, _, err = runCommand(ctx, opts.Path, args, installerEnv(jobTemp), jobTemp, logw)
 		}
 		if err != nil {
 			return err
@@ -604,6 +606,8 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string) (stri
 		ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 		defer cancel()
 		logw := &jobLogWriter{jobs: s.Jobs, id: j.ID, ctx: ctx}
+		jobTemp, _ := JobTempDir(s.DataDir, j.ID)
+		defer RemoveAllPath(jobTemp)
 		// parse uninstall info
 		var entry UninstallEntry
 		_ = json.Unmarshal([]byte(app.UninstallInfo), &entry)
@@ -615,7 +619,7 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string) (stri
 			if !regexp.MustCompile(`^\{[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}$`).MatchString(code) {
 				return fmt.Errorf("ProductCode inválido")
 			}
-			c, _, err := runCommand(ctx, "msiexec", []string{"/x", code, "/qn", "/norestart"}, installerEnv(s.StagingDir()), s.StagingDir(), logw)
+			c, _, err := runCommand(ctx, MsiexecPath(), []string{"/x", code, "/qn", "/norestart"}, installerEnv(jobTemp), jobTemp, logw)
 			if err != nil {
 				return err
 			}
@@ -626,6 +630,9 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string) (stri
 				s.setRestartPending()
 			}
 		} else if entry.QuietUninstallString != "" {
+			if entry.UninstallerSHA256 == "" {
+				return fmt.Errorf("sin hash de desinstalador: rechazado")
+			}
 			parts := splitCommand(entry.QuietUninstallString)
 			if len(parts) == 0 {
 				return fmt.Errorf("quiet uninstall string vacío")
@@ -633,11 +640,12 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string) (stri
 			exe := parts[0]
 			args := parts[1:]
 			if entry.UninstallerSHA256 != "" {
-				if h, err := SHA256File(exe); err == nil && h != entry.UninstallerSHA256 {
-					return fmt.Errorf("desinstalador manipulado")
+				h, err := SHA256File(exe)
+				if err != nil || h != entry.UninstallerSHA256 {
+					return fmt.Errorf("desinstalador manipulado o no verificable")
 				}
 			}
-			c, _, err := runCommand(ctx, exe, args, installerEnv(s.StagingDir()), s.StagingDir(), logw)
+			c, _, err := runCommand(ctx, exe, args, installerEnv(jobTemp), jobTemp, logw)
 			if err != nil {
 				return err
 			}
@@ -645,6 +653,9 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string) (stri
 				return fmt.Errorf("uninstall exited %d", c)
 			}
 		} else if entry.UninstallString != "" {
+			if entry.UninstallerSHA256 == "" {
+				return fmt.Errorf("sin hash de desinstalador: rechazado")
+			}
 			parts := splitCommand(entry.UninstallString)
 			if len(parts) == 0 {
 				return fmt.Errorf("uninstall string vacío")
@@ -656,7 +667,7 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string) (stri
 					return fmt.Errorf("desinstalador manipulado")
 				}
 			}
-			c, _, err := runCommand(ctx, exe, args, installerEnv(s.StagingDir()), s.StagingDir(), logw)
+			c, _, err := runCommand(ctx, exe, args, installerEnv(jobTemp), jobTemp, logw)
 			if err != nil {
 				return err
 			}
@@ -665,7 +676,7 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string) (stri
 			}
 		} else if strings.HasPrefix(app.UninstallInfo, "{") {
 			code := app.UninstallInfo
-			c, _, err := runCommand(ctx, "msiexec", []string{"/x", code, "/qn", "/norestart"}, installerEnv(s.StagingDir()), s.StagingDir(), logw)
+			c, _, err := runCommand(ctx, MsiexecPath(), []string{"/x", code, "/qn", "/norestart"}, installerEnv(jobTemp), jobTemp, logw)
 			if err != nil {
 				return err
 			}

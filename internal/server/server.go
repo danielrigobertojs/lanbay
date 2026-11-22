@@ -20,6 +20,7 @@ import (
 	lanbayweb "github.com/danielrigobertojs/lanbay/internal/web"
 	"log/slog"
 	"net"
+	"io"
 	"net/http"
 	"net/netip"
 	"os"
@@ -872,8 +873,67 @@ func (s *Server) softwareConfirmInstalled(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) softwareStageInstaller(w http.ResponseWriter, r *http.Request) {
-	// Temporarily disabled until B6.1-B6.5 are fixed (JCB-464). No side effects.
-	http.Error(w, "staging endpoint deshabilitado temporalmente", http.StatusServiceUnavailable)
+	if !s.session(w, r, true) {
+		return
+	}
+	if s.software == nil {
+		http.Error(w, "software no disponible", http.StatusServiceUnavailable)
+		return
+	}
+	// B7.4: MaxBytesReader before anything.
+	r.Body = http.MaxBytesReader(w, r.Body, 128<<20)
+	mr, err := r.MultipartReader()
+	if err != nil {
+		http.Error(w, "solicitud inválida", 400)
+		return
+	}
+	var reauth string
+	var filename string
+	var data []byte
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			http.Error(w, "solicitud inválida", 400)
+			return
+		}
+		if part.FormName() == "reauth_password" {
+			b, _ := io.ReadAll(io.LimitReader(part, 1024))
+			reauth = string(b)
+			part.Close()
+			continue
+		}
+		if part.FormName() == "file" {
+			filename = part.FileName()
+			data, err = io.ReadAll(part)
+			if err != nil {
+				http.Error(w, "no se pudo leer el archivo", 400)
+				return
+			}
+			part.Close()
+			continue
+		}
+		part.Close()
+	}
+	cookie, _ := r.Cookie(auth.CookieName)
+	verified, failed, e := s.auth.VerifyPasswordForSession(r.Context(), cookie.Value, reauth)
+	if e != nil || !verified {
+		if failed {
+			s.audit(r, "staging_upload", "failed")
+		}
+		http.Error(w, "re-autenticación requerida", http.StatusUnauthorized)
+		return
+	}
+	name, err := s.software.StageInstaller(data, filename)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	s.audit(r, "staging_upload", "ok")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(map[string]string{"name": name})
 }
 
 func (s *Server) audit(r *http.Request, action, result string) {

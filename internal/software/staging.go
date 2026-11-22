@@ -169,3 +169,30 @@ func installerEnv(stagingDir string) []string {
 		"TMP=" + stagingDir,
 	}
 }
+
+// MsiexecPath returns the absolute path to msiexec.
+func MsiexecPath() string {
+	systemRoot := os.Getenv("SystemRoot")
+	if systemRoot == "" {
+		systemRoot = `C:\Windows`
+	}
+	p := filepath.Join(systemRoot, "System32", "msiexec.exe")
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	return "msiexec"
+}
+
+// JobTempDir creates and returns a per-job temporary directory under DataDir.
+func JobTempDir(dataDir, jobID string) (string, error) {
+	dir := filepath.Join(dataDir, "tmp", jobID)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// RemoveAllPath removes a path (best effort).
+func RemoveAllPath(path string) error {
+	return os.RemoveAll(path)
+}
