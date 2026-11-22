@@ -491,6 +491,7 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 		if err != nil {
 			return err
 		}
+		defer retained.Close()
 		info, err := InspectInstaller(opts.Path)
 		if err != nil {
 			retained.Close()
@@ -587,6 +588,7 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 		} else {
 			_, _ = s.Jobs.Update(ctx, j.ID, jobs.Completed, -1, "no rastreable", "")
 		}
+		retained.Close()
 		if !opts.KeepInstaller && len(diff) <= 1 {
 			_ = RemoveStagingFile(opts.Path)
 		}

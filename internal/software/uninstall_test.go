@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,8 +90,8 @@ func TestUninstallUploadedHKCUConfirm(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		j, _ := svc.Jobs.Get(ctx, jobID)
 		if j.State == jobs.Failed || j.State == jobs.Completed || j.State == jobs.Canceled {
-			if j.State != jobs.Failed {
-				t.Fatalf("expected failed, got %s: %s", j.State, j.Message)
+			if j.State != jobs.Failed || !strings.Contains(j.Log, "confirmación") {
+				t.Fatalf("expected confirm error, got %s: %s", j.State, j.Message)
 			}
 			return
 		}
