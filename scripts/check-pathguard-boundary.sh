@@ -27,7 +27,7 @@ while IFS= read -r file; do
 		# (MkdirAll, Stat, Open, Remove, EvalSymlinks) a través de ResolveStagingPath.
 		# internal/software/finalpath_windows.go: windows.CreateFile con FILE_FLAG_OPEN_REPARSE_POINT
 		# para canonicalizar la ruta (GetFinalPathNameByHandle) sin seguir reparse points.
-		internal/software/backend_windows.go|internal/software/staging.go|internal/software/finalpath_windows.go)
+		internal/software/backend_windows.go|internal/software/staging.go|internal/software/finalpath_windows.go|internal/software/finalpath_unix.go)
 			;;
 		internal/config/datadir_unix.go|internal/config/datadir_windows.go|internal/server/server.go|internal/server/tls.go|spikes/*|tools/kitpack/main.go|tools/kitserver/main.go)
 			;;

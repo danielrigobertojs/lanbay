@@ -490,6 +490,12 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 		if err != nil {
 			return err
 		}
+		// Retain a shared-read handle until the installer finishes (INS-2).
+		retained, err := openRetained(opts.Path)
+		if err != nil {
+			return err
+		}
+		defer retained.Close()
 		if info.Authenticode.Signed && !info.Authenticode.Valid {
 			return fmt.Errorf("firma Authenticode inválida o manipulada")
 		}
