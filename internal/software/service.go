@@ -607,6 +607,27 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string, confi
 	if app.Source != SourceUpload {
 		return "", ErrNotManaged
 	}
+	// INS-5: confirmation check before creating the job (synchronous).
+	var entry UninstallEntry
+	_ = json.Unmarshal([]byte(app.UninstallInfo), &entry)
+	userProfile := os.Getenv("USERPROFILE")
+	requiresConfirm := entry.Root == "HKCU"
+	if !requiresConfirm && (entry.QuietUninstallString != "" || entry.UninstallString != "") {
+		exe := ""
+		for _, cand := range []string{entry.QuietUninstallString, entry.UninstallString} {
+			parts := splitCommand(cand)
+			if len(parts) > 0 {
+				exe = parts[0]
+				break
+			}
+		}
+		if userProfile != "" && strings.HasPrefix(strings.ToLower(exe), strings.ToLower(userProfile)) {
+			requiresConfirm = true
+		}
+	}
+	if requiresConfirm && !confirm {
+		return "", fmt.Errorf("desinstalador en perfil de usuario: confirmación requerida")
+	}
 	if s.Jobs == nil {
 		return "", fmt.Errorf("jobs unavailable")
 	}
@@ -626,25 +647,6 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string, confi
 		// parse uninstall info
 		var entry UninstallEntry
 		_ = json.Unmarshal([]byte(app.UninstallInfo), &entry)
-		// INS-5: HKCU or user-writable uninstaller requires confirmation.
-		userProfile := os.Getenv("USERPROFILE")
-		requiresConfirm := entry.Root == "HKCU"
-		if !requiresConfirm && (entry.QuietUninstallString != "" || entry.UninstallString != "") {
-			exe := ""
-			for _, cand := range []string{entry.QuietUninstallString, entry.UninstallString} {
-				parts := splitCommand(cand)
-				if len(parts) > 0 {
-					exe = parts[0]
-					break
-				}
-			}
-			if userProfile != "" && strings.HasPrefix(strings.ToLower(exe), strings.ToLower(userProfile)) {
-				requiresConfirm = true
-			}
-		}
-		if requiresConfirm && !confirm {
-			return fmt.Errorf("desinstalador en perfil de usuario: confirmación requerida")
-		}
 		if entry.Key == "" && app.UninstallInfo != "" {
 			// could be msi: code or key
 		}
