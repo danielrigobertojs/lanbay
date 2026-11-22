@@ -2,6 +2,7 @@
 package software
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -122,65 +123,30 @@ func StagingFileExists(path string) bool {
 // StageUploadedFile writes a validated installer to staging under a server-generated
 // name. It checks the extension and the magic bytes (MZ for .exe, OLE CFB for .msi).
 func StageUploadedFile(stagingDir, originalName string, data []byte) (string, error) {
-	ext := strings.ToLower(filepath.Ext(originalName))
-	if ext != ".msi" && ext != ".exe" {
-		return "", errors.New("extensión no permitida")
-	}
-	if len(data) < 8 {
-		return "", errors.New("archivo demasiado pequeño")
-	}
-	if ext == ".exe" {
-		if data[0] != 0x4D || data[1] != 0x5A {
-			return "", errors.New("firma MZ no válida")
-		}
-	} else {
-		magic := []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1}
-		for i := range magic {
-			if data[i] != magic[i] {
-				return "", errors.New("firma OLE CFB no válida")
-			}
-		}
-	}
-	if err := EnsureStagingDir(stagingDir); err != nil {
-		return "", err
-	}
-	id := make([]byte, 16)
-	if _, err := rand.Read(id); err != nil {
-		return "", err
-	}
-	name := hex.EncodeToString(id) + ext
-	dest := filepath.Join(stagingDir, name)
-	if err := os.WriteFile(dest, data, 0600); err != nil {
-		return "", err
-	}
-	return name, nil
+	return StageInstallerStream(stagingDir, originalName, bytes.NewReader(data))
 }
 
 // installerEnv returns an explicit, minimal environment for elevated installers.
-func installerEnv(stagingDir string) []string {
-	systemRoot := os.Getenv("SystemRoot")
-	if systemRoot == "" {
-		systemRoot = `C:\Windows`
-	}
+func installerEnv(tempDir string) []string {
+	sysDir := systemDirectory()
+	systemRoot := filepath.Dir(sysDir)
 	return []string{
-		"PATH=" + filepath.Join(systemRoot, "System32") + ";" + systemRoot,
+		"PATH=" + sysDir + ";" + systemRoot,
 		"SystemRoot=" + systemRoot,
-		"TEMP=" + stagingDir,
-		"TMP=" + stagingDir,
+		"TEMP=" + tempDir,
+		"TMP=" + tempDir,
 	}
 }
 
 // MsiexecPath returns the absolute path to msiexec.
 func MsiexecPath() string {
-	systemRoot := os.Getenv("SystemRoot")
-	if systemRoot == "" {
-		systemRoot = `C:\Windows`
-	}
-	p := filepath.Join(systemRoot, "System32", "msiexec.exe")
+	dir := systemDirectory()
+	p := filepath.Join(dir, "msiexec.exe")
 	if _, err := os.Stat(p); err == nil {
 		return p
 	}
-	return "msiexec"
+	// No fallback: fail closed.
+	return ""
 }
 
 // JobTempDir creates and returns a per-job temporary directory under DataDir.
@@ -195,4 +161,70 @@ func JobTempDir(dataDir, jobID string) (string, error) {
 // RemoveAllPath removes a path (best effort).
 func RemoveAllPath(path string) error {
 	return os.RemoveAll(path)
+}
+
+// StageInstallerStream streams a validated installer to staging.
+func StageInstallerStream(stagingDir, originalName string, r interface{ Read([]byte) (int, error) }) (string, error) {
+	ext := strings.ToLower(filepath.Ext(originalName))
+	if ext != ".msi" && ext != ".exe" {
+		return "", errors.New("extensión no permitida")
+	}
+	if err := EnsureStagingDir(stagingDir); err != nil {
+		return "", err
+	}
+	idBytes := make([]byte, 16)
+	if _, err := rand.Read(idBytes); err != nil {
+		return "", err
+	}
+	id := hex.EncodeToString(idBytes)
+	partPath := filepath.Join(stagingDir, id+ext+".part")
+	f, err := os.OpenFile(partPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return "", err
+	}
+	header := make([]byte, 8)
+	n, err := io.ReadFull(r, header)
+	if err != nil || n < 8 {
+		f.Close()
+		_ = os.Remove(partPath)
+		return "", errors.New("archivo demasiado pequeño")
+	}
+	if ext == ".exe" {
+		if header[0] != 0x4D || header[1] != 0x5A {
+			f.Close()
+			_ = os.Remove(partPath)
+			return "", errors.New("firma MZ no válida")
+		}
+	} else {
+		magic := []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1}
+		for i := range magic {
+			if header[i] != magic[i] {
+				f.Close()
+				_ = os.Remove(partPath)
+				return "", errors.New("firma OLE CFB no válida")
+			}
+		}
+	}
+	h := sha256.New()
+	mw := io.MultiWriter(f, h)
+	if _, err := mw.Write(header); err != nil {
+		f.Close()
+		_ = os.Remove(partPath)
+		return "", err
+	}
+	if _, err := io.Copy(mw, r); err != nil {
+		f.Close()
+		_ = os.Remove(partPath)
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(partPath)
+		return "", err
+	}
+	finalName := id + ext
+	if err := os.Rename(partPath, filepath.Join(stagingDir, finalName)); err != nil {
+		_ = os.Remove(partPath)
+		return "", err
+	}
+	return finalName, nil
 }

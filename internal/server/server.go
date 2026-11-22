@@ -18,9 +18,10 @@ import (
 	"github.com/danielrigobertojs/lanbay/internal/uploads"
 	"github.com/danielrigobertojs/lanbay/internal/volumes"
 	lanbayweb "github.com/danielrigobertojs/lanbay/internal/web"
-	"log/slog"
-	"net"
 	"io"
+	"log/slog"
+	"mime/multipart"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -743,7 +744,8 @@ func (s *Server) softwareUninstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	jobID, err := s.software.Uninstall(r.Context(), id)
+	confirm := r.URL.Query().Get("confirm") == "1"
+	jobID, err := s.software.Uninstall(r.Context(), id, confirm)
 	if err != nil {
 		code := http.StatusBadRequest
 		if errors.Is(err, software.ErrDisabled) || errors.Is(err, software.ErrUnavailable) {
@@ -880,16 +882,15 @@ func (s *Server) softwareStageInstaller(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "software no disponible", http.StatusServiceUnavailable)
 		return
 	}
-	// B7.4: MaxBytesReader before anything.
 	r.Body = http.MaxBytesReader(w, r.Body, 128<<20)
 	mr, err := r.MultipartReader()
 	if err != nil {
 		http.Error(w, "solicitud inválida", 400)
 		return
 	}
+	// Read reauth_password first.
 	var reauth string
-	var filename string
-	var data []byte
+	var filePart *multipart.Part
 	for {
 		part, err := mr.NextPart()
 		if err == io.EOF {
@@ -906,14 +907,8 @@ func (s *Server) softwareStageInstaller(w http.ResponseWriter, r *http.Request) 
 			continue
 		}
 		if part.FormName() == "file" {
-			filename = part.FileName()
-			data, err = io.ReadAll(part)
-			if err != nil {
-				http.Error(w, "no se pudo leer el archivo", 400)
-				return
-			}
-			part.Close()
-			continue
+			filePart = part
+			break
 		}
 		part.Close()
 	}
@@ -923,10 +918,18 @@ func (s *Server) softwareStageInstaller(w http.ResponseWriter, r *http.Request) 
 		if failed {
 			s.audit(r, "staging_upload", "failed")
 		}
+		if filePart != nil {
+			filePart.Close()
+		}
 		http.Error(w, "re-autenticación requerida", http.StatusUnauthorized)
 		return
 	}
-	name, err := s.software.StageInstaller(data, filename)
+	if filePart == nil {
+		http.Error(w, "archivo requerido", 400)
+		return
+	}
+	defer filePart.Close()
+	name, err := s.software.StageInstallerStream(filePart.FileName(), filePart)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
