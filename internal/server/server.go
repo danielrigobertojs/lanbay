@@ -18,7 +18,6 @@ import (
 	"github.com/danielrigobertojs/lanbay/internal/uploads"
 	"github.com/danielrigobertojs/lanbay/internal/volumes"
 	lanbayweb "github.com/danielrigobertojs/lanbay/internal/web"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -873,51 +872,8 @@ func (s *Server) softwareConfirmInstalled(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) softwareStageInstaller(w http.ResponseWriter, r *http.Request) {
-	if !s.session(w, r, true) {
-		return
-	}
-	if s.software == nil {
-		http.Error(w, "software no disponible", http.StatusServiceUnavailable)
-		return
-	}
-	// Re-authentication for staging (AUTH-6).
-	cookie, _ := r.Cookie(auth.CookieName)
-	var in struct {
-		ReauthPassword string `json:"reauth_password"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&in)
-	verified, failed, e := s.auth.VerifyPasswordForSession(r.Context(), cookie.Value, in.ReauthPassword)
-	if e != nil || !verified {
-		if failed {
-			s.audit(r, "staging_upload", "failed")
-		}
-		http.Error(w, "re-autenticación requerida", http.StatusUnauthorized)
-		return
-	}
-	// Accept multipart upload.
-	if err := r.ParseMultipartForm(128 << 20); err != nil {
-		http.Error(w, "solicitud inválida", 400)
-		return
-	}
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		http.Error(w, "archivo requerido", 400)
-		return
-	}
-	defer file.Close()
-	data, err := io.ReadAll(file)
-	if err != nil {
-		http.Error(w, "no se pudo leer el archivo", 400)
-		return
-	}
-	name, err := s.software.StageInstaller(data, header.Filename)
-	if err != nil {
-		http.Error(w, err.Error(), 400)
-		return
-	}
-	s.audit(r, "staging_upload", "ok")
-	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(map[string]string{"name": name})
+	// Temporarily disabled until B6.1-B6.5 are fixed (JCB-464). No side effects.
+	http.Error(w, "staging endpoint deshabilitado temporalmente", http.StatusServiceUnavailable)
 }
 
 func (s *Server) audit(r *http.Request, action, result string) {
