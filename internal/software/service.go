@@ -628,6 +628,21 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string, confi
 	if requiresConfirm && !confirm {
 		return "", fmt.Errorf("desinstalador en perfil de usuario: confirmación requerida")
 	}
+	// Synchronous hash check (fail-closed) before creating the job.
+	for _, cand := range []string{entry.QuietUninstallString, entry.UninstallString} {
+		parts := splitCommand(cand)
+		if len(parts) == 0 {
+			continue
+		}
+		if entry.UninstallerSHA256 == "" {
+			return "", fmt.Errorf("sin hash de desinstalador: rechazado")
+		}
+		if h, err := SHA256File(parts[0]); err == nil && h != entry.UninstallerSHA256 {
+			return "", fmt.Errorf("desinstalador manipulado")
+		} else if err != nil {
+			return "", fmt.Errorf("desinstalador no verificable")
+		}
+	}
 	if s.Jobs == nil {
 		return "", fmt.Errorf("jobs unavailable")
 	}
