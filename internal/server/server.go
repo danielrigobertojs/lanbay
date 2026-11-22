@@ -797,6 +797,10 @@ func (s *Server) softwareInstallUploaded(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "re-autenticación requerida", http.StatusUnauthorized)
 		return
 	}
+	if in.Path != "" {
+		in.Name = filepath.Base(in.Path)
+		in.Path = ""
+	}
 	jobID, err := s.software.InstallUploaded(r.Context(), software.InstallUploadOptions{
 		Path: in.Path, Name: in.Name, InstallerID: in.InstallerID, Preset: in.Preset, Args: in.Args, Interactive: in.Interactive, KeepInstaller: in.Keep, ConfirmUnsigned: in.ConfirmUnsigned, ConfirmName: in.ConfirmName,
 	})
@@ -806,6 +810,8 @@ func (s *Server) softwareInstallUploaded(w http.ResponseWriter, r *http.Request)
 	}
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]string{"job_id": jobID})
+	s.audit(r, "installer_install", "ok")
+
 }
 
 func (s *Server) softwareInspectInstaller(w http.ResponseWriter, r *http.Request) {
@@ -816,11 +822,11 @@ func (s *Server) softwareInspectInstaller(w http.ResponseWriter, r *http.Request
 		http.Error(w, "software no disponible", http.StatusServiceUnavailable)
 		return
 	}
-	path := r.URL.Query().Get("path")
-	if path == "" {
-		path = r.URL.Query().Get("name")
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		name = filepath.Base(r.URL.Query().Get("path"))
 	}
-	info, err := s.software.InspectInstaller(path)
+	info, err := s.software.InspectInstaller(name)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return

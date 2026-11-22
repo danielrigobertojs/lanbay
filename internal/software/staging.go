@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -22,81 +24,46 @@ func RemoveStagingFile(path string) error {
 	return os.Remove(path)
 }
 
-// ResolveStagingPath validates that a client-supplied value resolves to a
-// regular .msi/.exe file directly inside the staging directory. It accepts a
-// bare file name or a path already contained in staging; anything else
-// (traversal, symlinks/junctions, ADS, UNC, prefixes, the staging root
-// itself, directories, other extensions) is rejected.
-func ResolveStagingPath(stagingDir, input string) (string, error) {
-	if strings.TrimSpace(input) == "" {
-		return "", errors.New("path requerido")
+var stagingNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.(?i:msi|exe)$`)
+
+// ResolveStagingPath accepts ONLY a base file name. It resolves the staging
+// directory and verifies the resulting path stays inside it (handle-based on
+// Windows, EvalSymlinks on Unix). Any separator, ADS, UNC or device prefix is
+// rejected by the regex before touching the filesystem.
+func ResolveStagingPath(stagingDir, name string) (string, error) {
+	if strings.Contains(name, string(os.PathSeparator)) || strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		return "", errors.New("path fuera de staging")
+	}
+	if !stagingNameRE.MatchString(name) {
+		return "", errors.New("path fuera de staging")
+	}
+	root, err := finalPath(stagingDir)
+	if err != nil {
+		return "", err
 	}
 	if err := EnsureStagingDir(stagingDir); err != nil {
 		return "", err
 	}
-	stagingAbs, err := filepath.Abs(stagingDir)
+	p := filepath.Join(stagingDir, name)
+	fi, err := os.Lstat(p)
+	if err != nil || !fi.Mode().IsRegular() {
+		return "", errors.New("path fuera de staging")
+	}
+	final, err := finalPath(p)
 	if err != nil {
-		return "", err
+		return "", errors.New("path fuera de staging")
 	}
-	stagingResolved, err := filepath.EvalSymlinks(stagingAbs)
-	if err != nil {
-		stagingResolved = stagingAbs
+	if !samePath(filepath.Dir(final), root) {
+		return "", errors.New("path fuera de staging")
 	}
-	// On Windows, EvalSymlinks may not resolve; fall back to finalPath.
-	if rp, err := finalPath(stagingAbs); err == nil && rp != "" {
-		stagingResolved = rp
-	}
+	return p, nil
+}
 
-	candidate := input
-	if !filepath.IsAbs(candidate) {
-		if filepath.Base(candidate) == candidate {
-			candidate = filepath.Join(stagingAbs, candidate)
-		}
+func samePath(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
 	}
-	candAbs, err := filepath.Abs(candidate)
-	if err != nil {
-		return "", err
-	}
-	// Reject ADS, UNC and device prefixes outright.
-	lower := strings.ToLower(candAbs)
-	if strings.Contains(lower, "::") || strings.HasPrefix(lower, `\\?\`) || strings.HasPrefix(lower, `\\`) {
-		return "", errors.New("path fuera de staging")
-	}
-	if fi, err := os.Lstat(candAbs); err == nil {
-		if fi.Mode()&os.ModeSymlink != 0 {
-			return "", errors.New("path fuera de staging")
-		}
-		if !fi.Mode().IsRegular() {
-			return "", errors.New("path fuera de staging")
-		}
-		ext := strings.ToLower(filepath.Ext(candAbs))
-		if ext != ".msi" && ext != ".exe" {
-			return "", errors.New("extensión no permitida")
-		}
-	}
-	resolved, err := finalPath(candAbs)
-	if err != nil {
-		return "", errors.New("path fuera de staging")
-	}
-	if resolved == "" {
-		resolved = candAbs
-	}
-	// On Unix, ensure symlinks are fully resolved.
-	if rp, err := filepath.EvalSymlinks(candAbs); err == nil {
-		resolved = rp
-	}
-	rel, err := filepath.Rel(stagingResolved, resolved)
-	if err != nil {
-		return "", errors.New("path fuera de staging")
-	}
-	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return "", errors.New("path fuera de staging")
-	}
-	// Reject the staging root itself and any directory.
-	if resolved == stagingResolved {
-		return "", errors.New("path fuera de staging")
-	}
-	return resolved, nil
+	return a == b
 }
 
 func SHA256File(path string) (string, error) {

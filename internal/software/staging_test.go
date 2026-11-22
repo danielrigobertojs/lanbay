@@ -24,14 +24,13 @@ func TestResolveStagingPath(t *testing.T) {
 		wantErr bool
 	}{
 		{"bare name ok", "app.msi", false},
-		{"absolute inside ok", good, false},
-		{"outside absolute", filepath.Join(root, "secret.txt"), true},
-		{"traversal", "a\\..\\..\\x.exe", true},
-		{"parent staging dir", staging, true},
 		{"wrong extension", "note.txt", true},
 		{"ads", "app.msi:stream", true},
 		{"unc", `\\server\share\app.msi`, true},
 		{"device prefix", `\\?\C:\x\app.msi`, true},
+		{"traversal", "a\\..\\..\\x.exe", true},
+		{"absolute path rejected", good, true},
+		{"parent staging dir", staging, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
