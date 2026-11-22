@@ -254,7 +254,7 @@ func InspectInstallerHandle(f *os.File) (InstallerInfo, error) {
 		SHA256: hex.EncodeToString(h.Sum(nil)),
 		Type:   installerType(path),
 	}
-	ai, _ := VerifyAuthenticode(context.Background(), path)
+	ai, _ := VerifyAuthenticodeHandle(context.Background(), f)
 	info.Authenticode = ai
 	return info, nil
 }

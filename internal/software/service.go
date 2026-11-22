@@ -500,12 +500,12 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 		if info.Authenticode.Signed && !info.Authenticode.Valid {
 			return fmt.Errorf("firma Authenticode inválida o manipulada")
 		}
-		if info.Authenticode.Status != "Valid" && info.Authenticode.Status != "Unsigned" && !info.Authenticode.Signed {
+		if info.Authenticode.Status != "Valid" && info.Authenticode.Status != "Unsigned" && info.Authenticode.Status != "RevocationUnchecked" && !info.Authenticode.Signed {
 			return fmt.Errorf("estado Authenticode desconocido o no verificable")
 		}
-		if !info.Authenticode.Signed {
+		if info.Authenticode.Status == "Unsigned" || info.Authenticode.Status == "RevocationUnchecked" {
 			if !opts.ConfirmUnsigned {
-				return fmt.Errorf("instalador sin firma: confirmación requerida")
+				return fmt.Errorf("instalador sin firma o revocación no comprobable: confirmación requerida")
 			}
 			if opts.ConfirmName == "" || opts.ConfirmName != filepath.Base(opts.Path) {
 				return fmt.Errorf("confirmación de nombre incorrecta")
