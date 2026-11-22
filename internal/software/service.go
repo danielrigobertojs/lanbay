@@ -448,6 +448,12 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 	if s.Jobs == nil {
 		return "", fmt.Errorf("jobs unavailable")
 	}
+	if opts.Path == "" && opts.Name != "" {
+		opts.Path = opts.Name
+	}
+	if opts.Path == "" && opts.InstallerID != "" {
+		opts.Path = opts.InstallerID
+	}
 	if opts.Path == "" {
 		return "", fmt.Errorf("path requerido")
 	}
@@ -467,10 +473,24 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 		ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 		defer cancel()
 		logw := &jobLogWriter{jobs: s.Jobs, id: j.ID, ctx: ctx}
+		info, err := InspectInstaller(opts.Path)
+		if err != nil {
+			return err
+		}
+		if info.Authenticode.Signed && !info.Authenticode.Valid {
+			return fmt.Errorf("firma Authenticode inválida o manipulada")
+		}
+		if !info.Authenticode.Signed {
+			if !opts.ConfirmUnsigned {
+				return fmt.Errorf("instalador sin firma: confirmación requerida")
+			}
+			if opts.ConfirmName != "" && opts.ConfirmName != filepath.Base(opts.Path) {
+				return fmt.Errorf("confirmación de nombre incorrecta")
+			}
+		}
 		before, _ := SnapshotUninstallKeys(ctx)
 		ext := strings.ToLower(filepath.Ext(opts.Path))
 		var code int
-		var err error
 		if ext == ".msi" {
 			logPath := opts.Path + ".log"
 			code, _, err = runCommand(ctx, "msiexec", []string{"/i", opts.Path, "/qn", "/norestart", "/l*v", logPath}, nil, filepath.Dir(opts.Path), logw)

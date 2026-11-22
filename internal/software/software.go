@@ -205,12 +205,17 @@ type InstallerInfo struct {
 
 // InstallUploadOptions configures an uploaded installer job.
 type InstallUploadOptions struct {
-	Path          string   `json:"path"`
-	Preset        string   `json:"preset,omitempty"`
-	Args          []string `json:"args,omitempty"`
-	Interactive   bool     `json:"interactive,omitempty"`
-	KeepInstaller bool     `json:"keep_installer,omitempty"`
-	ChoiceKeys    []string `json:"choice_keys,omitempty"`
+	Path            string   `json:"path"`
+	Name            string   `json:"name,omitempty"`
+	InstallerID     string   `json:"installer_id,omitempty"`
+	Preset          string   `json:"preset,omitempty"`
+	Args            []string `json:"args,omitempty"`
+	Interactive     bool     `json:"interactive,omitempty"`
+	KeepInstaller   bool     `json:"keep_installer,omitempty"`
+	ChoiceKeys      []string `json:"choice_keys,omitempty"`
+	ConfirmUnsigned bool     `json:"confirm_unsigned,omitempty"`
+	ConfirmName     string   `json:"confirm_name,omitempty"`
+	ReauthPassword  string   `json:"reauth_password,omitempty"`
 }
 
 // InstallerPresets maps preset names to silent arguments.
@@ -306,9 +311,13 @@ func ResolveStagingPath(stagingDir, input string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if info, err := os.Lstat(candAbs); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		if resolved, err := filepath.EvalSymlinks(candAbs); err == nil {
+	if _, err := os.Lstat(candAbs); err == nil {
+		if resolved, err := finalPath(candAbs); err == nil && resolved != "" {
 			candAbs = resolved
+		} else if info, err := os.Lstat(candAbs); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if r, err := filepath.EvalSymlinks(candAbs); err == nil {
+				candAbs = r
+			}
 		}
 	}
 	rel, err := filepath.Rel(stagingAbs, candAbs)

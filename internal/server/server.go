@@ -766,18 +766,27 @@ func (s *Server) softwareInstallUploaded(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var in struct {
-		Path        string   `json:"path"`
-		Preset      string   `json:"preset"`
-		Args        []string `json:"args"`
-		Interactive bool     `json:"interactive"`
-		Keep        bool     `json:"keep_installer"`
+		Path            string   `json:"path"`
+		Name            string   `json:"name"`
+		InstallerID     string   `json:"installer_id"`
+		Preset          string   `json:"preset"`
+		Args            []string `json:"args"`
+		Interactive     bool     `json:"interactive"`
+		Keep            bool     `json:"keep_installer"`
+		ConfirmUnsigned bool     `json:"confirm_unsigned"`
+		ConfirmName     string   `json:"confirm_name"`
+		ReauthPassword  string   `json:"reauth_password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		http.Error(w, "solicitud inválida", 400)
 		return
 	}
+	if in.ReauthPassword == "" || !s.auth.VerifyPassword(r.Context(), in.ReauthPassword) {
+		http.Error(w, "re-autenticación requerida", 401)
+		return
+	}
 	jobID, err := s.software.InstallUploaded(r.Context(), software.InstallUploadOptions{
-		Path: in.Path, Preset: in.Preset, Args: in.Args, Interactive: in.Interactive, KeepInstaller: in.Keep,
+		Path: in.Path, Name: in.Name, InstallerID: in.InstallerID, Preset: in.Preset, Args: in.Args, Interactive: in.Interactive, KeepInstaller: in.Keep, ConfirmUnsigned: in.ConfirmUnsigned, ConfirmName: in.ConfirmName, ReauthPassword: in.ReauthPassword,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), 400)
@@ -796,6 +805,9 @@ func (s *Server) softwareInspectInstaller(w http.ResponseWriter, r *http.Request
 		return
 	}
 	path := r.URL.Query().Get("path")
+	if path == "" {
+		path = r.URL.Query().Get("name")
+	}
 	info, err := s.software.InspectInstaller(path)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
