@@ -628,19 +628,36 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string, confi
 	if requiresConfirm && !confirm {
 		return "", fmt.Errorf("desinstalador en perfil de usuario: confirmación requerida")
 	}
-	// Synchronous hash check (fail-closed) before creating the job.
-	for _, cand := range []string{entry.QuietUninstallString, entry.UninstallString} {
-		parts := splitCommand(cand)
-		if len(parts) == 0 {
-			continue
+	// Resolve MSI product code first (live branch).
+	msiCode := entry.ProductCode
+	if msiCode == "" && strings.HasPrefix(app.UninstallInfo, "msi:") {
+		msiCode = strings.TrimPrefix(app.UninstallInfo, "msi:")
+	}
+	if msiCode == "" {
+		re := regexp.MustCompile(`(?i)^"?msiexec(?:\.exe)?"?\s+/[XI]\s*(\{[0-9A-Fa-f-]+\})`)
+		for _, cand := range []string{entry.QuietUninstallString, entry.UninstallString} {
+			if m := re.FindStringSubmatch(strings.TrimSpace(cand)); len(m) > 1 {
+				msiCode = m[1]
+				break
+			}
 		}
-		if entry.UninstallerSHA256 == "" {
-			return "", fmt.Errorf("sin hash de desinstalador: rechazado")
-		}
-		if h, err := SHA256File(parts[0]); err == nil && h != entry.UninstallerSHA256 {
-			return "", fmt.Errorf("desinstalador manipulado")
-		} else if err != nil {
-			return "", fmt.Errorf("desinstalador no verificable")
+	}
+	isMSI := msiCode != "" && regexp.MustCompile(`^\{[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}$`).MatchString(msiCode)
+	// Synchronous hash check (fail-closed) before creating the job, only for non-MSI.
+	if !isMSI {
+		for _, cand := range []string{entry.QuietUninstallString, entry.UninstallString} {
+			parts := splitCommand(cand)
+			if len(parts) == 0 {
+				continue
+			}
+			if entry.UninstallerSHA256 == "" {
+				return "", fmt.Errorf("sin hash de desinstalador: rechazado")
+			}
+			if h, err := SHA256File(parts[0]); err == nil && h != entry.UninstallerSHA256 {
+				return "", fmt.Errorf("desinstalador manipulado")
+			} else if err != nil {
+				return "", fmt.Errorf("desinstalador no verificable")
+			}
 		}
 	}
 	if s.Jobs == nil {
