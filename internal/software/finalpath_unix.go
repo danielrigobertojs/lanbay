@@ -6,6 +6,7 @@ package software
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 func finalPath(path string) (string, error) {
@@ -16,4 +17,14 @@ func finalPath(path string) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+func openRetained(path string) (*os.File, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	// Best-effort exclusive lock to prevent concurrent writes.
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	return f, nil
 }

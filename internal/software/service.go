@@ -486,8 +486,15 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 			return err
 		}
 		defer RemoveAllPath(jobTemp)
+		// Retain a shared-read handle BEFORE any verification (INS-2).
+		retained, err := openRetained(opts.Path)
+		if err != nil {
+			return err
+		}
+		defer retained.Close()
 		info, err := InspectInstaller(opts.Path)
 		if err != nil {
+			retained.Close()
 			return err
 		}
 		if info.Authenticode.Signed && !info.Authenticode.Valid {
@@ -581,6 +588,7 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 		} else {
 			_, _ = s.Jobs.Update(ctx, j.ID, jobs.Completed, -1, "no rastreable", "")
 		}
+		retained.Close()
 		if !opts.KeepInstaller && len(diff) <= 1 {
 			_ = RemoveStagingFile(opts.Path)
 		}
