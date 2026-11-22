@@ -8,8 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"os/exec"
+	"path/filepath"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -81,7 +81,13 @@ func VerifyAuthenticodeHandle(ctx context.Context, f *os.File) (AuthenticodeInfo
 		info.Signed = true
 		info.Valid = true
 		info.Status = "Valid"
-	case int(ret.(windows.Errno)) == trustENoSignature:
+	case func() bool {
+		var errno windows.Errno
+		if errors.As(ret, &errno) {
+			return int(errno) == trustENoSignature
+		}
+		return false
+	}():
 		info.Signed = false
 		info.Valid = false
 		info.Status = "Unsigned"
@@ -110,9 +116,6 @@ func VerifyAuthenticodeHandle(ctx context.Context, f *os.File) (AuthenticodeInfo
 		if psInfo.Message != "" && info.Message == "" {
 			info.Message = psInfo.Message
 		}
-		if info.Status == "Invalid" && psInfo.Status != "" {
-			info.Status = psInfo.Status
-		}
 		if psInfo.Status == "Unsigned" {
 			info.Signed = false
 			info.Valid = false
@@ -128,11 +131,16 @@ func VerifyAuthenticodeHandle(ctx context.Context, f *os.File) (AuthenticodeInfo
 func verifyAuthenticodePowerShell(ctx context.Context, path string) (AuthenticodeInfo, error) {
 	ps := filepath.Join(systemDirectory(), "WindowsPowerShell", "v1.0", "powershell.exe")
 	if _, err := os.Stat(ps); err != nil {
-		ps = "powershell"
+		// Omit signer extraction; do not fall back to PATH.
+		return AuthenticodeInfo{}, nil
 	}
 	cmd := exec.CommandContext(ctx, ps, "-NoProfile", "-NonInteractive", "-Command",
 		"Get-AuthenticodeSignature -FilePath $env:LANBAY_FILE | Select-Object Status, StatusMessage, @{Name='Signer';Expression={$_.SignerCertificate.Subject}} | ConvertTo-Json -Compress")
-	cmd.Env = append(os.Environ(), "LANBAY_FILE="+path)
+	cmd.Env = []string{
+		"PATH=" + systemDirectory(),
+		"SystemRoot=" + filepath.Dir(systemDirectory()),
+		"LANBAY_FILE=" + path,
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		return AuthenticodeInfo{}, err
