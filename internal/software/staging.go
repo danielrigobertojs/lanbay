@@ -1,0 +1,171 @@
+// SPDX-License-Identifier: Apache-2.0
+package software
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strings"
+)
+
+// EnsureStagingDir creates the staging directory with a restrictive mode.
+func EnsureStagingDir(stagingDir string) error {
+	return os.MkdirAll(stagingDir, 0700)
+}
+
+// RemoveStagingFile removes a file from staging (best effort).
+func RemoveStagingFile(path string) error {
+	return os.Remove(path)
+}
+
+var stagingNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.(?i:msi|exe)$`)
+
+// ResolveStagingPath accepts ONLY a base file name. It resolves the staging
+// directory and verifies the resulting path stays inside it (handle-based on
+// Windows, EvalSymlinks on Unix). Any separator, ADS, UNC or device prefix is
+// rejected by the regex before touching the filesystem.
+func ResolveStagingPath(stagingDir, name string) (string, error) {
+	if strings.Contains(name, string(os.PathSeparator)) || strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		return "", errors.New("path fuera de staging")
+	}
+	if !stagingNameRE.MatchString(name) {
+		return "", errors.New("path fuera de staging")
+	}
+	root, err := finalPath(stagingDir)
+	if err != nil {
+		return "", err
+	}
+	if err := EnsureStagingDir(stagingDir); err != nil {
+		return "", err
+	}
+	p := filepath.Join(stagingDir, name)
+	fi, err := os.Lstat(p)
+	if err != nil || !fi.Mode().IsRegular() {
+		return "", errors.New("path fuera de staging")
+	}
+	final, err := finalPath(p)
+	if err != nil {
+		return "", errors.New("path fuera de staging")
+	}
+	if !samePath(filepath.Dir(final), root) {
+		return "", errors.New("path fuera de staging")
+	}
+	return p, nil
+}
+
+func samePath(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+func SHA256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func InspectInstaller(path string) (InstallerInfo, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return InstallerInfo{}, err
+	}
+	hash, err := SHA256File(path)
+	if err != nil {
+		return InstallerInfo{}, err
+	}
+	info := InstallerInfo{
+		Path:   path,
+		Name:   fi.Name(),
+		Size:   fi.Size(),
+		SHA256: hash,
+		Type:   installerType(path),
+	}
+	ai, _ := VerifyAuthenticode(context.Background(), path)
+	info.Authenticode = ai
+	return info, nil
+}
+
+func installerType(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".msi":
+		return "msi"
+	case ".exe":
+		return "exe"
+	default:
+		return ext
+	}
+}
+
+// StagingFileExists reports whether a path exists in staging.
+func StagingFileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// StageUploadedFile writes a validated installer to staging under a server-generated
+// name. It checks the extension and the magic bytes (MZ for .exe, OLE CFB for .msi).
+func StageUploadedFile(stagingDir, originalName string, data []byte) (string, error) {
+	ext := strings.ToLower(filepath.Ext(originalName))
+	if ext != ".msi" && ext != ".exe" {
+		return "", errors.New("extensión no permitida")
+	}
+	if len(data) < 8 {
+		return "", errors.New("archivo demasiado pequeño")
+	}
+	if ext == ".exe" {
+		if data[0] != 0x4D || data[1] != 0x5A {
+			return "", errors.New("firma MZ no válida")
+		}
+	} else {
+		magic := []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1}
+		for i := range magic {
+			if data[i] != magic[i] {
+				return "", errors.New("firma OLE CFB no válida")
+			}
+		}
+	}
+	if err := EnsureStagingDir(stagingDir); err != nil {
+		return "", err
+	}
+	id := make([]byte, 16)
+	if _, err := rand.Read(id); err != nil {
+		return "", err
+	}
+	name := hex.EncodeToString(id) + ext
+	dest := filepath.Join(stagingDir, name)
+	if err := os.WriteFile(dest, data, 0600); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+// installerEnv returns an explicit, minimal environment for elevated installers.
+func installerEnv(stagingDir string) []string {
+	systemRoot := os.Getenv("SystemRoot")
+	if systemRoot == "" {
+		systemRoot = `C:\Windows`
+	}
+	return []string{
+		"PATH=" + filepath.Join(systemRoot, "System32") + ";" + systemRoot,
+		"SystemRoot=" + systemRoot,
+		"TEMP=" + stagingDir,
+		"TMP=" + stagingDir,
+	}
+}

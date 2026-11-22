@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -15,6 +14,11 @@ import (
 
 	"github.com/danielrigobertojs/lanbay/internal/jobs"
 )
+
+type pendingInstall struct {
+	entries []UninstallEntry
+	path    string
+}
 
 type Service struct {
 	db       *sql.DB
@@ -28,7 +32,7 @@ type Service struct {
 	installMu      sync.Mutex
 
 	pendingMu      sync.Mutex
-	pendingChoices map[string][]UninstallEntry
+	pendingChoices map[string]pendingInstall
 }
 
 var wingetIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
@@ -83,7 +87,11 @@ func NewService(db *sql.DB, backend Backend, jm *jobs.Manager, dataDir string) (
 	if err := EnsureSchema(context.Background(), db); err != nil {
 		return nil, err
 	}
-	return &Service{db: db, Registry: NewRegistry(db), Backend: backend, Jobs: jm, DataDir: dataDir, pendingChoices: map[string][]UninstallEntry{}}, nil
+	svc := &Service{db: db, Registry: NewRegistry(db), Backend: backend, Jobs: jm, DataDir: dataDir, pendingChoices: map[string]pendingInstall{}}
+	if err := EnsureStagingDir(svc.StagingDir()); err != nil {
+		return nil, fmt.Errorf("create staging dir: %w", err)
+	}
+	return svc, nil
 }
 
 func (s *Service) RestartPending() bool {
@@ -361,24 +369,31 @@ func (w *jobLogWriter) Write(p []byte) (int, error) {
 }
 
 func (s *Service) StagingDir() string {
-	return filepath.Join(s.DataDir, "staging")
+	dir := filepath.Join(s.DataDir, "staging")
+	_ = EnsureStagingDir(dir)
+	return dir
 }
 
 func (s *Service) InspectInstaller(path string) (InstallerInfo, error) {
-	return InspectInstaller(path)
+	safe, err := ResolveStagingPath(s.StagingDir(), path)
+	if err != nil {
+		return InstallerInfo{}, err
+	}
+	return InspectInstaller(safe)
 }
 
 func (s *Service) PendingInstallChoices(jobID string) []UninstallEntry {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
-	out := make([]UninstallEntry, len(s.pendingChoices[jobID]))
-	copy(out, s.pendingChoices[jobID])
+	out := make([]UninstallEntry, len(s.pendingChoices[jobID].entries))
+	copy(out, s.pendingChoices[jobID].entries)
 	return out
 }
 
 func (s *Service) ConfirmInstalled(ctx context.Context, jobID string, chosen []string, keep bool) error {
 	s.pendingMu.Lock()
-	choices := s.pendingChoices[jobID]
+	pending := s.pendingChoices[jobID]
+	choices := pending.entries
 	delete(s.pendingChoices, jobID)
 	s.pendingMu.Unlock()
 	allowed := map[string]bool{}
@@ -408,6 +423,9 @@ func (s *Service) ConfirmInstalled(ctx context.Context, jobID string, chosen []s
 	if len(b) > 0 {
 		uninstallInfo = string(b)
 	}
+	if !keep && pending.path != "" {
+		_ = RemoveStagingFile(pending.path)
+	}
 	return s.Registry.Add(ctx, ManagedApp{
 		ID:            id,
 		Source:        SourceUpload,
@@ -429,11 +447,30 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 	if s.Jobs == nil {
 		return "", fmt.Errorf("jobs unavailable")
 	}
+	if opts.Path == "" && opts.Name != "" {
+		opts.Path = opts.Name
+	}
+	if opts.Path == "" && opts.InstallerID != "" {
+		opts.Path = opts.InstallerID
+	}
 	if opts.Path == "" {
 		return "", fmt.Errorf("path requerido")
 	}
-	if _, err := os.Stat(opts.Path); err != nil {
+	safe, err := ResolveStagingPath(s.StagingDir(), opts.Path)
+	if err != nil {
 		return "", err
+	}
+	opts.Path = safe
+	for _, a := range opts.Args {
+		if len(a) > 1024 {
+			return "", fmt.Errorf("argumento demasiado largo")
+		}
+		if strings.ContainsAny(a, "\"\x00\n\r") {
+			return "", fmt.Errorf("carácter no permitido en argumento")
+		}
+	}
+	if !StagingFileExists(opts.Path) {
+		return "", fmt.Errorf("instalador no encontrado en staging")
 	}
 	j, err := s.Jobs.Create(ctx, "installer-install", 0)
 	if err != nil {
@@ -443,13 +480,38 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 		ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 		defer cancel()
 		logw := &jobLogWriter{jobs: s.Jobs, id: j.ID, ctx: ctx}
+		info, err := InspectInstaller(opts.Path)
+		if err != nil {
+			return err
+		}
+		if info.Authenticode.Signed && !info.Authenticode.Valid {
+			return fmt.Errorf("firma Authenticode inválida o manipulada")
+		}
+		if info.Authenticode.Status != "Valid" && info.Authenticode.Status != "Unsigned" && !info.Authenticode.Signed {
+			return fmt.Errorf("estado Authenticode desconocido o no verificable")
+		}
+		if !info.Authenticode.Signed {
+			if !opts.ConfirmUnsigned {
+				return fmt.Errorf("instalador sin firma: confirmación requerida")
+			}
+			if opts.ConfirmName == "" || opts.ConfirmName != filepath.Base(opts.Path) {
+				return fmt.Errorf("confirmación de nombre incorrecta")
+			}
+		}
 		before, _ := SnapshotUninstallKeys(ctx)
 		ext := strings.ToLower(filepath.Ext(opts.Path))
+		if ext == ".msi" {
+			code, err := ReadMSIProductCode(opts.Path)
+			if err == nil && code != "" {
+				if !regexp.MustCompile(`^\{[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}$`).MatchString(code) {
+					return fmt.Errorf("ProductCode inválido")
+				}
+			}
+		}
 		var code int
-		var err error
 		if ext == ".msi" {
 			logPath := opts.Path + ".log"
-			code, _, err = runCommand(ctx, "msiexec", []string{"/i", opts.Path, "/qn", "/norestart", "/l*v", logPath}, nil, filepath.Dir(opts.Path), logw)
+			code, _, err = runCommand(ctx, "msiexec", []string{"/i", opts.Path, "/qn", "/norestart", "/l*v", logPath}, installerEnv(s.StagingDir()), filepath.Dir(opts.Path), logw)
 		} else {
 			args := []string{}
 			if !opts.Interactive {
@@ -460,7 +522,7 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 			} else {
 				args = append(args, opts.Args...)
 			}
-			code, _, err = runCommand(ctx, opts.Path, args, nil, filepath.Dir(opts.Path), logw)
+			code, _, err = runCommand(ctx, opts.Path, args, installerEnv(s.StagingDir()), filepath.Dir(opts.Path), logw)
 		}
 		if err != nil {
 			return err
@@ -475,6 +537,16 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 		diff := DiffUninstallKeys(before, after)
 		if len(diff) == 1 {
 			e := diff[0]
+			// Compute SHA-256 of the uninstaller executable (if parseable).
+			for _, cand := range []string{e.QuietUninstallString, e.UninstallString} {
+				parts := splitCommand(cand)
+				if len(parts) > 0 {
+					if h, err := SHA256File(parts[0]); err == nil {
+						e.UninstallerSHA256 = h
+						break
+					}
+				}
+			}
 			id := "upload:" + e.Key
 			uninstallInfo := e.Key
 			if e.ProductCode != "" {
@@ -496,7 +568,7 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 			})
 		} else if len(diff) > 1 {
 			s.pendingMu.Lock()
-			s.pendingChoices[j.ID] = diff
+			s.pendingChoices[j.ID] = pendingInstall{entries: diff, path: opts.Path}
 			s.pendingMu.Unlock()
 			_, _ = s.Jobs.Update(ctx, j.ID, jobs.Completed, -1, "seleccione las entradas instaladas", "")
 			// prevent Start from overwriting message? Start will set completed; okay
@@ -504,7 +576,7 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 			_, _ = s.Jobs.Update(ctx, j.ID, jobs.Completed, -1, "no rastreable", "")
 		}
 		if !opts.KeepInstaller && len(diff) <= 1 {
-			_ = os.Remove(opts.Path)
+			_ = RemoveStagingFile(opts.Path)
 		}
 		return nil
 	})
@@ -540,7 +612,10 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string) (stri
 		}
 		if strings.HasPrefix(app.UninstallInfo, "msi:") {
 			code := strings.TrimPrefix(app.UninstallInfo, "msi:")
-			c, _, err := runCommand(ctx, "msiexec", []string{"/x", code, "/qn", "/norestart"}, nil, s.StagingDir(), logw)
+			if !regexp.MustCompile(`^\{[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}$`).MatchString(code) {
+				return fmt.Errorf("ProductCode inválido")
+			}
+			c, _, err := runCommand(ctx, "msiexec", []string{"/x", code, "/qn", "/norestart"}, installerEnv(s.StagingDir()), s.StagingDir(), logw)
 			if err != nil {
 				return err
 			}
@@ -551,13 +626,18 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string) (stri
 				s.setRestartPending()
 			}
 		} else if entry.QuietUninstallString != "" {
-			parts := strings.Fields(entry.QuietUninstallString)
+			parts := splitCommand(entry.QuietUninstallString)
 			if len(parts) == 0 {
 				return fmt.Errorf("quiet uninstall string vacío")
 			}
 			exe := parts[0]
 			args := parts[1:]
-			c, _, err := runCommand(ctx, exe, args, nil, s.StagingDir(), logw)
+			if entry.UninstallerSHA256 != "" {
+				if h, err := SHA256File(exe); err == nil && h != entry.UninstallerSHA256 {
+					return fmt.Errorf("desinstalador manipulado")
+				}
+			}
+			c, _, err := runCommand(ctx, exe, args, installerEnv(s.StagingDir()), s.StagingDir(), logw)
 			if err != nil {
 				return err
 			}
@@ -565,13 +645,18 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string) (stri
 				return fmt.Errorf("uninstall exited %d", c)
 			}
 		} else if entry.UninstallString != "" {
-			parts := strings.Fields(entry.UninstallString)
+			parts := splitCommand(entry.UninstallString)
 			if len(parts) == 0 {
 				return fmt.Errorf("uninstall string vacío")
 			}
 			exe := parts[0]
 			args := parts[1:]
-			c, _, err := runCommand(ctx, exe, args, nil, s.StagingDir(), logw)
+			if entry.UninstallerSHA256 != "" {
+				if h, err := SHA256File(exe); err == nil && h != entry.UninstallerSHA256 {
+					return fmt.Errorf("desinstalador manipulado")
+				}
+			}
+			c, _, err := runCommand(ctx, exe, args, installerEnv(s.StagingDir()), s.StagingDir(), logw)
 			if err != nil {
 				return err
 			}
@@ -580,7 +665,7 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string) (stri
 			}
 		} else if strings.HasPrefix(app.UninstallInfo, "{") {
 			code := app.UninstallInfo
-			c, _, err := runCommand(ctx, "msiexec", []string{"/x", code, "/qn", "/norestart"}, nil, s.StagingDir(), logw)
+			c, _, err := runCommand(ctx, "msiexec", []string{"/x", code, "/qn", "/norestart"}, installerEnv(s.StagingDir()), s.StagingDir(), logw)
 			if err != nil {
 				return err
 			}
@@ -593,4 +678,34 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string) (stri
 		return s.Registry.UpdateStatus(ctx, managedID, StatusUninstalled)
 	})
 	return j.ID, nil
+}
+
+// splitCommand splits a command line into argv, honouring double-quoted
+// segments with spaces (e.g. "C:\Program Files\x\uninstall.exe" /S).
+func splitCommand(line string) []string {
+	var parts []string
+	var cur strings.Builder
+	inQuote := false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case c == '"':
+			inQuote = !inQuote
+		case (c == ' ' || c == '\t') && !inQuote:
+			if cur.Len() > 0 {
+				parts = append(parts, cur.String())
+				cur.Reset()
+			}
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	if cur.Len() > 0 {
+		parts = append(parts, cur.String())
+	}
+	return parts
+}
+
+func (s *Service) StageInstaller(data []byte, originalName string) (string, error) {
+	return StageUploadedFile(s.StagingDir(), originalName, data)
 }

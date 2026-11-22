@@ -5,15 +5,10 @@ package software
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
-	"strings"
 )
 
 var (
@@ -205,12 +200,16 @@ type InstallerInfo struct {
 
 // InstallUploadOptions configures an uploaded installer job.
 type InstallUploadOptions struct {
-	Path          string   `json:"path"`
-	Preset        string   `json:"preset,omitempty"`
-	Args          []string `json:"args,omitempty"`
-	Interactive   bool     `json:"interactive,omitempty"`
-	KeepInstaller bool     `json:"keep_installer,omitempty"`
-	ChoiceKeys    []string `json:"choice_keys,omitempty"`
+	Path            string   `json:"path"`
+	Name            string   `json:"name,omitempty"`
+	InstallerID     string   `json:"installer_id,omitempty"`
+	Preset          string   `json:"preset,omitempty"`
+	Args            []string `json:"args,omitempty"`
+	Interactive     bool     `json:"interactive,omitempty"`
+	KeepInstaller   bool     `json:"keep_installer,omitempty"`
+	ChoiceKeys      []string `json:"choice_keys,omitempty"`
+	ConfirmUnsigned bool     `json:"confirm_unsigned,omitempty"`
+	ConfirmName     string   `json:"confirm_name,omitempty"`
 }
 
 // InstallerPresets maps preset names to silent arguments.
@@ -232,50 +231,4 @@ func PresetArgs(preset string) []string {
 		return out
 	}
 	return nil
-}
-
-func SHA256File(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-func InspectInstaller(path string) (InstallerInfo, error) {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return InstallerInfo{}, err
-	}
-	hash, err := SHA256File(path)
-	if err != nil {
-		return InstallerInfo{}, err
-	}
-	info := InstallerInfo{
-		Path:   path,
-		Name:   fi.Name(),
-		Size:   fi.Size(),
-		SHA256: hash,
-		Type:   installerType(path),
-	}
-	ai, _ := VerifyAuthenticode(context.Background(), path)
-	info.Authenticode = ai
-	return info, nil
-}
-
-func installerType(path string) string {
-	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
-	case ".msi":
-		return "msi"
-	case ".exe":
-		return "exe"
-	default:
-		return ext
-	}
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/danielrigobertojs/lanbay/internal/uploads"
 	"github.com/danielrigobertojs/lanbay/internal/volumes"
 	lanbayweb "github.com/danielrigobertojs/lanbay/internal/web"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -100,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/software/installers/inspect", s.softwareInspectInstaller)
 	mux.HandleFunc("GET /api/v1/software/installers/pending/{job}", s.softwarePendingChoices)
 	mux.HandleFunc("POST /api/v1/software/installers/confirm", s.softwareConfirmInstalled)
+	mux.HandleFunc("POST /api/v1/software/staging", s.softwareStageInstaller)
 	mux.HandleFunc("GET /api/v1/software/updates", s.softwareUpdates)
 	mux.HandleFunc("POST /api/v1/software/{id}/upgrade", s.softwareUpgrade)
 	mux.HandleFunc("POST /api/v1/software/{id}/uninstall", s.softwareUninstall)
@@ -766,18 +768,43 @@ func (s *Server) softwareInstallUploaded(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var in struct {
-		Path        string   `json:"path"`
-		Preset      string   `json:"preset"`
-		Args        []string `json:"args"`
-		Interactive bool     `json:"interactive"`
-		Keep        bool     `json:"keep_installer"`
+		Path            string   `json:"path"`
+		Name            string   `json:"name"`
+		InstallerID     string   `json:"installer_id"`
+		Preset          string   `json:"preset"`
+		Args            []string `json:"args"`
+		Interactive     bool     `json:"interactive"`
+		Keep            bool     `json:"keep_installer"`
+		ConfirmUnsigned bool     `json:"confirm_unsigned"`
+		ConfirmName     string   `json:"confirm_name"`
+		ReauthPassword  string   `json:"reauth_password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		http.Error(w, "solicitud inválida", 400)
 		return
 	}
+	cookie, _ := r.Cookie(auth.CookieName)
+	verified, failed, e := s.auth.VerifyPasswordForSession(r.Context(), cookie.Value, in.ReauthPassword)
+	if e != nil {
+		if failed {
+			s.audit(r, "installer_install", "failed")
+		}
+		http.Error(w, "no se pudo verificar la sesión", http.StatusInternalServerError)
+		return
+	}
+	if !verified {
+		if failed {
+			s.audit(r, "installer_install", "failed")
+		}
+		http.Error(w, "re-autenticación requerida", http.StatusUnauthorized)
+		return
+	}
+	if in.Path != "" {
+		in.Name = filepath.Base(in.Path)
+		in.Path = ""
+	}
 	jobID, err := s.software.InstallUploaded(r.Context(), software.InstallUploadOptions{
-		Path: in.Path, Preset: in.Preset, Args: in.Args, Interactive: in.Interactive, KeepInstaller: in.Keep,
+		Path: in.Path, Name: in.Name, InstallerID: in.InstallerID, Preset: in.Preset, Args: in.Args, Interactive: in.Interactive, KeepInstaller: in.Keep, ConfirmUnsigned: in.ConfirmUnsigned, ConfirmName: in.ConfirmName,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), 400)
@@ -785,6 +812,8 @@ func (s *Server) softwareInstallUploaded(w http.ResponseWriter, r *http.Request)
 	}
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]string{"job_id": jobID})
+	s.audit(r, "installer_install", "ok")
+
 }
 
 func (s *Server) softwareInspectInstaller(w http.ResponseWriter, r *http.Request) {
@@ -795,8 +824,11 @@ func (s *Server) softwareInspectInstaller(w http.ResponseWriter, r *http.Request
 		http.Error(w, "software no disponible", http.StatusServiceUnavailable)
 		return
 	}
-	path := r.URL.Query().Get("path")
-	info, err := s.software.InspectInstaller(path)
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		name = filepath.Base(r.URL.Query().Get("path"))
+	}
+	info, err := s.software.InspectInstaller(name)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
@@ -838,6 +870,54 @@ func (s *Server) softwareConfirmInstalled(w http.ResponseWriter, r *http.Request
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) softwareStageInstaller(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, true) {
+		return
+	}
+	if s.software == nil {
+		http.Error(w, "software no disponible", http.StatusServiceUnavailable)
+		return
+	}
+	// Re-authentication for staging (AUTH-6).
+	cookie, _ := r.Cookie(auth.CookieName)
+	var in struct {
+		ReauthPassword string `json:"reauth_password"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	verified, failed, e := s.auth.VerifyPasswordForSession(r.Context(), cookie.Value, in.ReauthPassword)
+	if e != nil || !verified {
+		if failed {
+			s.audit(r, "staging_upload", "failed")
+		}
+		http.Error(w, "re-autenticación requerida", http.StatusUnauthorized)
+		return
+	}
+	// Accept multipart upload.
+	if err := r.ParseMultipartForm(128 << 20); err != nil {
+		http.Error(w, "solicitud inválida", 400)
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "archivo requerido", 400)
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, "no se pudo leer el archivo", 400)
+		return
+	}
+	name, err := s.software.StageInstaller(data, header.Filename)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	s.audit(r, "staging_upload", "ok")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(map[string]string{"name": name})
 }
 
 func (s *Server) audit(r *http.Request, action, result string) {

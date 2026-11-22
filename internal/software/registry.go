@@ -13,6 +13,7 @@ type UninstallEntry struct {
 	QuietUninstallString string `json:"quiet_uninstall_string,omitempty"`
 	UninstallString      string `json:"uninstall_string,omitempty"`
 	ProductCode          string `json:"product_code,omitempty"`
+	UninstallerSHA256    string `json:"uninstaller_sha256,omitempty"`
 }
 
 // RegistrySnapshot maps a unique registry key path to its entry.
