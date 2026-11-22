@@ -3,6 +3,7 @@ package software
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -116,4 +117,55 @@ func installerType(path string) string {
 func StagingFileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// StageUploadedFile writes a validated installer to staging under a server-generated
+// name. It checks the extension and the magic bytes (MZ for .exe, OLE CFB for .msi).
+func StageUploadedFile(stagingDir, originalName string, data []byte) (string, error) {
+	ext := strings.ToLower(filepath.Ext(originalName))
+	if ext != ".msi" && ext != ".exe" {
+		return "", errors.New("extensión no permitida")
+	}
+	if len(data) < 8 {
+		return "", errors.New("archivo demasiado pequeño")
+	}
+	if ext == ".exe" {
+		if data[0] != 0x4D || data[1] != 0x5A {
+			return "", errors.New("firma MZ no válida")
+		}
+	} else {
+		magic := []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1}
+		for i := range magic {
+			if data[i] != magic[i] {
+				return "", errors.New("firma OLE CFB no válida")
+			}
+		}
+	}
+	if err := EnsureStagingDir(stagingDir); err != nil {
+		return "", err
+	}
+	id := make([]byte, 16)
+	if _, err := rand.Read(id); err != nil {
+		return "", err
+	}
+	name := hex.EncodeToString(id) + ext
+	dest := filepath.Join(stagingDir, name)
+	if err := os.WriteFile(dest, data, 0600); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+// installerEnv returns an explicit, minimal environment for elevated installers.
+func installerEnv(stagingDir string) []string {
+	systemRoot := os.Getenv("SystemRoot")
+	if systemRoot == "" {
+		systemRoot = `C:\Windows`
+	}
+	return []string{
+		"PATH=" + filepath.Join(systemRoot, "System32") + ";" + systemRoot,
+		"SystemRoot=" + systemRoot,
+		"TEMP=" + stagingDir,
+		"TMP=" + stagingDir,
+	}
 }

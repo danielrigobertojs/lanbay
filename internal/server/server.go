@@ -18,6 +18,7 @@ import (
 	"github.com/danielrigobertojs/lanbay/internal/uploads"
 	"github.com/danielrigobertojs/lanbay/internal/volumes"
 	lanbayweb "github.com/danielrigobertojs/lanbay/internal/web"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -100,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/software/installers/inspect", s.softwareInspectInstaller)
 	mux.HandleFunc("GET /api/v1/software/installers/pending/{job}", s.softwarePendingChoices)
 	mux.HandleFunc("POST /api/v1/software/installers/confirm", s.softwareConfirmInstalled)
+	mux.HandleFunc("POST /api/v1/software/staging", s.softwareStageInstaller)
 	mux.HandleFunc("GET /api/v1/software/updates", s.softwareUpdates)
 	mux.HandleFunc("POST /api/v1/software/{id}/upgrade", s.softwareUpgrade)
 	mux.HandleFunc("POST /api/v1/software/{id}/uninstall", s.softwareUninstall)
@@ -868,6 +870,54 @@ func (s *Server) softwareConfirmInstalled(w http.ResponseWriter, r *http.Request
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) softwareStageInstaller(w http.ResponseWriter, r *http.Request) {
+	if !s.session(w, r, true) {
+		return
+	}
+	if s.software == nil {
+		http.Error(w, "software no disponible", http.StatusServiceUnavailable)
+		return
+	}
+	// Re-authentication for staging (AUTH-6).
+	cookie, _ := r.Cookie(auth.CookieName)
+	var in struct {
+		ReauthPassword string `json:"reauth_password"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	verified, failed, e := s.auth.VerifyPasswordForSession(r.Context(), cookie.Value, in.ReauthPassword)
+	if e != nil || !verified {
+		if failed {
+			s.audit(r, "staging_upload", "failed")
+		}
+		http.Error(w, "re-autenticación requerida", http.StatusUnauthorized)
+		return
+	}
+	// Accept multipart upload.
+	if err := r.ParseMultipartForm(128 << 20); err != nil {
+		http.Error(w, "solicitud inválida", 400)
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "archivo requerido", 400)
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, "no se pudo leer el archivo", 400)
+		return
+	}
+	name, err := s.software.StageInstaller(data, header.Filename)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	s.audit(r, "staging_upload", "ok")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(map[string]string{"name": name})
 }
 
 func (s *Server) audit(r *http.Request, action, result string) {

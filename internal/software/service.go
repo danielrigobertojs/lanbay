@@ -461,6 +461,14 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 		return "", err
 	}
 	opts.Path = safe
+	for _, a := range opts.Args {
+		if len(a) > 1024 {
+			return "", fmt.Errorf("argumento demasiado largo")
+		}
+		if strings.ContainsAny(a, "\"\x00\n\r") {
+			return "", fmt.Errorf("carácter no permitido en argumento")
+		}
+	}
 	if !StagingFileExists(opts.Path) {
 		return "", fmt.Errorf("instalador no encontrado en staging")
 	}
@@ -479,20 +487,31 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 		if info.Authenticode.Signed && !info.Authenticode.Valid {
 			return fmt.Errorf("firma Authenticode inválida o manipulada")
 		}
+		if info.Authenticode.Status != "Valid" && info.Authenticode.Status != "Unsigned" && !info.Authenticode.Signed {
+			return fmt.Errorf("estado Authenticode desconocido o no verificable")
+		}
 		if !info.Authenticode.Signed {
 			if !opts.ConfirmUnsigned {
 				return fmt.Errorf("instalador sin firma: confirmación requerida")
 			}
-			if opts.ConfirmName != "" && opts.ConfirmName != filepath.Base(opts.Path) {
+			if opts.ConfirmName == "" || opts.ConfirmName != filepath.Base(opts.Path) {
 				return fmt.Errorf("confirmación de nombre incorrecta")
 			}
 		}
 		before, _ := SnapshotUninstallKeys(ctx)
 		ext := strings.ToLower(filepath.Ext(opts.Path))
+		if ext == ".msi" {
+			code, err := ReadMSIProductCode(opts.Path)
+			if err == nil && code != "" {
+				if !regexp.MustCompile(`^\{[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}$`).MatchString(code) {
+					return fmt.Errorf("ProductCode inválido")
+				}
+			}
+		}
 		var code int
 		if ext == ".msi" {
 			logPath := opts.Path + ".log"
-			code, _, err = runCommand(ctx, "msiexec", []string{"/i", opts.Path, "/qn", "/norestart", "/l*v", logPath}, nil, filepath.Dir(opts.Path), logw)
+			code, _, err = runCommand(ctx, "msiexec", []string{"/i", opts.Path, "/qn", "/norestart", "/l*v", logPath}, installerEnv(s.StagingDir()), filepath.Dir(opts.Path), logw)
 		} else {
 			args := []string{}
 			if !opts.Interactive {
@@ -503,7 +522,7 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 			} else {
 				args = append(args, opts.Args...)
 			}
-			code, _, err = runCommand(ctx, opts.Path, args, nil, filepath.Dir(opts.Path), logw)
+			code, _, err = runCommand(ctx, opts.Path, args, installerEnv(s.StagingDir()), filepath.Dir(opts.Path), logw)
 		}
 		if err != nil {
 			return err
@@ -518,6 +537,16 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 		diff := DiffUninstallKeys(before, after)
 		if len(diff) == 1 {
 			e := diff[0]
+			// Compute SHA-256 of the uninstaller executable (if parseable).
+			for _, cand := range []string{e.QuietUninstallString, e.UninstallString} {
+				parts := splitCommand(cand)
+				if len(parts) > 0 {
+					if h, err := SHA256File(parts[0]); err == nil {
+						e.UninstallerSHA256 = h
+						break
+					}
+				}
+			}
 			id := "upload:" + e.Key
 			uninstallInfo := e.Key
 			if e.ProductCode != "" {
@@ -583,7 +612,10 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string) (stri
 		}
 		if strings.HasPrefix(app.UninstallInfo, "msi:") {
 			code := strings.TrimPrefix(app.UninstallInfo, "msi:")
-			c, _, err := runCommand(ctx, "msiexec", []string{"/x", code, "/qn", "/norestart"}, nil, s.StagingDir(), logw)
+			if !regexp.MustCompile(`^\{[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}$`).MatchString(code) {
+				return fmt.Errorf("ProductCode inválido")
+			}
+			c, _, err := runCommand(ctx, "msiexec", []string{"/x", code, "/qn", "/norestart"}, installerEnv(s.StagingDir()), s.StagingDir(), logw)
 			if err != nil {
 				return err
 			}
@@ -600,7 +632,12 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string) (stri
 			}
 			exe := parts[0]
 			args := parts[1:]
-			c, _, err := runCommand(ctx, exe, args, nil, s.StagingDir(), logw)
+			if entry.UninstallerSHA256 != "" {
+				if h, err := SHA256File(exe); err == nil && h != entry.UninstallerSHA256 {
+					return fmt.Errorf("desinstalador manipulado")
+				}
+			}
+			c, _, err := runCommand(ctx, exe, args, installerEnv(s.StagingDir()), s.StagingDir(), logw)
 			if err != nil {
 				return err
 			}
@@ -614,7 +651,12 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string) (stri
 			}
 			exe := parts[0]
 			args := parts[1:]
-			c, _, err := runCommand(ctx, exe, args, nil, s.StagingDir(), logw)
+			if entry.UninstallerSHA256 != "" {
+				if h, err := SHA256File(exe); err == nil && h != entry.UninstallerSHA256 {
+					return fmt.Errorf("desinstalador manipulado")
+				}
+			}
+			c, _, err := runCommand(ctx, exe, args, installerEnv(s.StagingDir()), s.StagingDir(), logw)
 			if err != nil {
 				return err
 			}
@@ -623,7 +665,7 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string) (stri
 			}
 		} else if strings.HasPrefix(app.UninstallInfo, "{") {
 			code := app.UninstallInfo
-			c, _, err := runCommand(ctx, "msiexec", []string{"/x", code, "/qn", "/norestart"}, nil, s.StagingDir(), logw)
+			c, _, err := runCommand(ctx, "msiexec", []string{"/x", code, "/qn", "/norestart"}, installerEnv(s.StagingDir()), s.StagingDir(), logw)
 			if err != nil {
 				return err
 			}
@@ -662,4 +704,8 @@ func splitCommand(line string) []string {
 		parts = append(parts, cur.String())
 	}
 	return parts
+}
+
+func (s *Service) StageInstaller(data []byte, originalName string) (string, error) {
+	return StageUploadedFile(s.StagingDir(), originalName, data)
 }
