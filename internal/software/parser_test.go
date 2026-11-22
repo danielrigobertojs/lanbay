@@ -73,3 +73,24 @@ func TestParseInstalledListPreexisting(t *testing.T) {
 		t.Fatalf("expected 1, got %d", len(res))
 	}
 }
+
+func TestJCB478MixedSourceFixture(t *testing.T) {
+	out := "Name  Id           Version  Available  Source\n---------------------------------------------\n7-Zip 7zip.7zip    24.00    25.00      winget\nStore App store.app  1.0      2.0        msstore\n"
+	res, err := ParseUpgrade(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 2 {
+		t.Fatalf("expected 2 parsed rows, got %d", len(res))
+	}
+	// Only the winget row must survive source validation.
+	var allowed int
+	for _, u := range res {
+		if ValidateResultSource(u.Source) == nil {
+			allowed++
+		}
+	}
+	if allowed != 1 {
+		t.Fatalf("expected 1 allowed (winget) row, got %d", allowed)
+	}
+}

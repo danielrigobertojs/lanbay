@@ -392,7 +392,7 @@ func (b *wingetBackend) ListUpgrades(ctx context.Context) ([]Update, error) {
 		return nil, err
 	}
 	defer os.RemoveAll(jobTemp)
-	_, out, err := runCommand(ctx, b.path, []string{"upgrade", "--accept-source-agreements", "--disable-interactivity"}, b.env(jobTemp), jobTemp, io.Discard)
+	_, out, err := runCommand(ctx, b.path, []string{"upgrade", "--source", "winget", "--accept-source-agreements", "--disable-interactivity"}, b.env(jobTemp), jobTemp, io.Discard)
 	if err != nil && len(out) == 0 {
 		return nil, err
 	}
@@ -400,12 +400,18 @@ func (b *wingetBackend) ListUpgrades(ctx context.Context) ([]Update, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Keep the winget updates even if winget reports (or a stale fixture
+	// contains) rows from another source: discard those rows instead of
+	// aborting the whole list (JCB-478). ValidateResultSource is still the
+	// gate for every individual row.
+	var result []Update
 	for _, u := range upd {
 		if err := ValidateResultSource(u.Source); err != nil {
-			return nil, err
+			continue
 		}
+		result = append(result, u)
 	}
-	return upd, nil
+	return result, nil
 }
 
 func (b *wingetBackend) env(tempDir string) []string {
