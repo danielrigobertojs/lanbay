@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
   [string]$LanbayURL,
-  [string]$Password,
+  [string]$Password = $env:LANBAY_PASSWORD,
   [string]$MicroSDRoot,
   [string]$TestMSI,
   [string]$InteractiveInstaller,
@@ -26,6 +26,7 @@ New-Item -ItemType Directory -Force -Path $outRoot | Out-Null
 $script:webSession = $null
 $script:csrfToken = $null
 $script:lanbayProc = $null
+$script:startedLanbay = $false
 
 function Write-SectionResult([string]$Section, [string]$Name, [string]$Status, $Evidence) {
   $dir = Join-Path $outRoot $Section
@@ -94,6 +95,7 @@ if (-not $LanbayURL) {
   }
   if (Test-Path $pwFile) { $Password = (Get-Content $pwFile -Raw).Trim() }
   $script:lanbayProc = Start-Process -FilePath $lanbayExe -PassThru -WindowStyle Hidden
+  $script:startedLanbay = $true
   Start-Sleep -Seconds 4
   $LanbayURL = 'https://localhost:8443'
 }
@@ -112,38 +114,52 @@ try {
 # junction root test (restaura en finally; no deja el data dir movido si falla)
 $backup = 'C:\ProgramData\Lanbay-backup-verify'
 $testRoot = 'C:\ProgramData\Lanbay-junctionroot'
-try {
-  if (Test-Path $backup) { Remove-Item $backup -Recurse -Force }
-  if (Test-Path 'C:\ProgramData\Lanbay') { Move-Item 'C:\ProgramData\Lanbay' $backup }
-  New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
-  cmd /c "mklink /J C:\ProgramData\Lanbay $testRoot" | Out-Null
-  $p = Start-Process -FilePath (Join-Path $kitRoot 'lanbay.exe') -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $outRoot 'junction-root.err')
-  Start-Sleep -Seconds 4
-  $running = -not $p.HasExited
-  if ($running) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
-  $errText = if (Test-Path (Join-Path $outRoot 'junction-root.err')) { Get-Content (Join-Path $outRoot 'junction-root.err') -Raw } else { '' }
-  $refused = -not $running -or ($errText -match 'junction|insegur|reparse')
-  Write-SectionResult 'M1' 'junction-root' $(if ($refused) { 'pass' } else { 'fail' }) @{ exit_code = $p.ExitCode; stderr = $errText }
-} catch {
-  Write-SectionResult 'M1' 'junction-root' 'fail' @{ error = $_.Exception.Message }
-} finally {
-  if (Test-Path 'C:\ProgramData\Lanbay') { cmd /c "rmdir C:\ProgramData\Lanbay" 2>$null | Out-Null }
-  if (Test-Path $backup) { Move-Item $backup 'C:\ProgramData\Lanbay' -Force }
-  if (Test-Path $testRoot) { Remove-Item $testRoot -Recurse -Force -ErrorAction SilentlyContinue }
+if (Test-Path $backup) {
+  Write-SectionResult 'M1' 'junction-root' 'fail' @{ error = 'Abortado: existe Lanbay-backup-verify de una ejecución anterior.' }
+} else {
+  $icaclsBefore = (& icacls 'C:\ProgramData\Lanbay' 2>&1 | Out-String)
+  # stop any running lanbay
+  Get-Process -Name lanbay -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 1
+  try {
+    if (Test-Path 'C:\ProgramData\Lanbay') { Move-Item 'C:\ProgramData\Lanbay' $backup }
+    New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
+    cmd /c "mklink /J C:\ProgramData\Lanbay $testRoot" | Out-Null
+    $p = Start-Process -FilePath (Join-Path $kitRoot 'lanbay.exe') -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $outRoot 'junction-root.err')
+    Start-Sleep -Seconds 4
+    $running = -not $p.HasExited
+    if ($running) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+    $errText = if (Test-Path (Join-Path $outRoot 'junction-root.err')) { Get-Content (Join-Path $outRoot 'junction-root.err') -Raw } else { '' }
+    $refused = (-not $running) -and ($errText -match 'junction|insegur|reparse')
+    $drift = ($icaclsBefore -ne $icaclsAfter)
+  Write-SectionResult 'M1' 'junction-root' $(if ($refused -and -not $drift) { 'pass' } else { 'fail' }) @{ exit_code = $p.ExitCode; stderr = $errText; icacls_before = $icaclsBefore; icacls_after = $icaclsAfter; icacls_changed = $drift }
+  } catch {
+    Write-SectionResult 'M1' 'junction-root' 'fail' @{ error = $_.Exception.Message }
+  } finally {
+    if (Test-Path 'C:\ProgramData\Lanbay') { cmd /c "rmdir C:\ProgramData\Lanbay" 2>$null | Out-Null }
+    if (Test-Path $backup) { Move-Item $backup 'C:\ProgramData\Lanbay' -Force }
+    if (Test-Path $testRoot) { Remove-Item $testRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    $icaclsAfter = (& icacls 'C:\ProgramData\Lanbay' 2>&1 | Out-String)
+    # Do not overwrite the previous result; record icacls drift as evidence only.
+    if ($icaclsBefore -ne $icaclsAfter) {
+      Write-Host "ADVERTENCIA: icacls cambió tras la prueba de junction-root."
+    }
+  }
 }
 
 # junction internal to System32
 try {
   $internalJunction = 'C:\ProgramData\Lanbay\junction-system32'
   if (-not (Test-Path 'C:\ProgramData\Lanbay')) { New-Item -ItemType Directory -Force -Path 'C:\ProgramData\Lanbay' | Out-Null }
-  cmd /c "mklink /J $internalJunction C:\Windows\System32" | Out-Null
+  if (-not (Test-Path 'C:\LanbayVerify\canary')) { New-Item -ItemType Directory -Force -Path 'C:\LanbayVerify\canary' | Out-Null }
+  cmd /c "mklink /J $internalJunction C:\LanbayVerify\canary" | Out-Null
   $p = Start-Process -FilePath (Join-Path $kitRoot 'lanbay.exe') -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $outRoot 'junction-internal.err')
   Start-Sleep -Seconds 4
   $running = -not $p.HasExited
   if ($running) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
   $errText = if (Test-Path (Join-Path $outRoot 'junction-internal.err')) { Get-Content (Join-Path $outRoot 'junction-internal.err') -Raw } else { '' }
   if (Test-Path $internalJunction) { cmd /c "rmdir `"$internalJunction`"" | Out-Null }
-  $refused = -not $running -or ($errText -match 'junction|insegur|reparse')
+  $refused = (-not $running) -and ($errText -match 'reparse|junction|insegur')
   Write-SectionResult 'M1' 'junction-internal' $(if ($refused) { 'pass' } else { 'fail' }) @{ exit_code = $p.ExitCode; stderr = $errText }
 } catch {
   Write-SectionResult 'M1' 'junction-internal' 'fail' @{ error = $_.Exception.Message }
@@ -155,6 +171,14 @@ if ($NonInteractive) {
 } else {
   $ans = Read-Host 'Ejecute `lanbay set-password` y confirme que no hace eco (S/N)'
   Write-SectionResult 'M1' 'set-password-noecho' $(if ($ans -eq 'S') { 'pass' } else { 'manual' }) @{ confirm = $ans }
+}
+
+# Re-launch Lanbay after junction tests only if this script started it
+if ($script:startedLanbay -and (-not $script:webSession)) {
+  if (-not $LanbayURL) { $LanbayURL = 'https://localhost:8443' }
+  if (-not $Password -and (Test-Path 'C:\ProgramData\Lanbay\initial-password.txt')) { $Password = (Get-Content 'C:\ProgramData\Lanbay\initial-password.txt' -Raw).Trim() }
+  $script:lanbayProc = Start-Process -FilePath (Join-Path $kitRoot 'lanbay.exe') -PassThru -WindowStyle Hidden
+  Start-Sleep -Seconds 5
 }
 
 # disk inventory via API

@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -33,7 +34,7 @@ const defaultMaxResultBytes int64 = 64 << 20
 
 type server struct {
 	token, kitPath, kitSHA256, resultsDir, bootstrapPath string
-	lanbayURL, lanbayPassword                            string
+	lanbayURL, lanbayPassword, lanbayCertSHA256          string
 	maxResultBytes                                       int64
 	inactivity                                           time.Duration
 	logger                                               *slog.Logger
@@ -170,8 +171,8 @@ func (s *server) storeResults(r *http.Request) error {
 	// Extract and generate summary.md
 	extractDir := filepath.Join(dir, "extracted")
 	_ = extractResultsZip(saved, extractDir)
-	_ = generateSummary(extractDir, s.lanbayURL, s.lanbayPassword)
-	_ = generateSummary(dir, s.lanbayURL, s.lanbayPassword)
+	_ = generateSummary(extractDir, s.lanbayURL, s.lanbayPassword, s.lanbayCertSHA256)
+	_ = generateSummary(dir, s.lanbayURL, s.lanbayPassword, s.lanbayCertSHA256)
 	return nil
 }
 
@@ -305,6 +306,7 @@ func main() {
 	bootstrap := flag.String("bootstrap", "", "path to bootstrap template")
 	lanbayURL := flag.String("lanbay-url", "", "Lanbay base URL for verify login")
 	lanbayPassword := flag.String("lanbay-password", "", "Lanbay password (or env LANBAY_PASSWORD)")
+	lanbayCertSHA := flag.String("lanbay-cert-sha256", "", "SHA-256 of Lanbay TLS certificate (pinning)")
 	verifyLogin := flag.Bool("verify-login", false, "perform Lanbay login + volume inventory and exit")
 	summarize := flag.Bool("summarize", false, "generate summary.md from a results directory and exit")
 	resultsDirFlag := flag.String("results-dir", "", "results directory for -summarize")
@@ -322,7 +324,7 @@ func main() {
 			slog.Error("results-dir is required for -summarize")
 			os.Exit(2)
 		}
-		if err := generateSummary(dir, *lanbayURL, *lanbayPassword); err != nil {
+		if err := generateSummary(dir, *lanbayURL, *lanbayPassword, *lanbayCertSHA); err != nil {
 			slog.Error("summarize", "error", err)
 			os.Exit(1)
 		}
@@ -333,7 +335,7 @@ func main() {
 			slog.Error("lanbay-url and lanbay-password are required for verify-login")
 			os.Exit(2)
 		}
-		if err := runVerifyLogin(context.Background(), *lanbayURL, *lanbayPassword); err != nil {
+		if err := runVerifyLogin(context.Background(), *lanbayURL, *lanbayPassword, *lanbayCertSHA); err != nil {
 			slog.Error("verify login", "error", err)
 			os.Exit(1)
 		}
@@ -379,6 +381,7 @@ func main() {
 	}
 	s.lanbayURL = *lanbayURL
 	s.lanbayPassword = *lanbayPassword
+	s.lanbayCertSHA256 = *lanbayCertSHA
 	host, port, _ := net.SplitHostPort(listener.Addr().String())
 	fmt.Printf("En PowerShell elevado de Windows, pegue:\nirm 'http://%s/%s/bootstrap.ps1' | iex\n", net.JoinHostPort(host, port), token)
 	if err := s.run(context.Background(), listener); err != nil && !errors.Is(err, context.Canceled) {
@@ -389,16 +392,29 @@ func main() {
 
 // lanbayHTTPClient returns an HTTP client suitable for talking to a Lanbay
 // instance, including its self-signed TLS certificate on the LAN.
-func lanbayHTTPClient(baseURL string) *http.Client {
+func lanbayHTTPClient(baseURL, certSHA string) *http.Client {
 	tr := &http.Transport{}
 	if strings.HasPrefix(baseURL, "https://") {
-		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		cfg := &tls.Config{InsecureSkipVerify: true}
+		if certSHA != "" {
+			cfg.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+				if len(rawCerts) == 0 {
+					return fmt.Errorf("no peer certificate")
+				}
+				h := sha256.Sum256(rawCerts[0])
+				if hex.EncodeToString(h[:]) != strings.ToLower(strings.TrimSpace(certSHA)) {
+					return fmt.Errorf("certificate SHA-256 mismatch")
+				}
+				return nil
+			}
+		}
+		tr.TLSClientConfig = cfg
 	}
 	return &http.Client{Transport: tr, Timeout: 30 * time.Second}
 }
 
-func lanbayLogin(ctx context.Context, baseURL, password string) (string, error) {
-	client := lanbayHTTPClient(baseURL)
+func lanbayLogin(ctx context.Context, baseURL, password, certSHA string) (string, error) {
+	client := lanbayHTTPClient(baseURL, certSHA)
 	body, _ := json.Marshal(map[string]string{"password": password})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+"/api/v1/auth/login", bytes.NewReader(body))
 	if err != nil {
@@ -432,8 +448,8 @@ func lanbayLogin(ctx context.Context, baseURL, password string) (string, error) 
 	return "", errors.New("session cookie not returned")
 }
 
-func lanbayVolumes(ctx context.Context, baseURL, sessionCookie string) ([]map[string]any, error) {
-	client := lanbayHTTPClient(baseURL)
+func lanbayVolumes(ctx context.Context, baseURL, sessionCookie, certSHA string) ([]map[string]any, error) {
+	client := lanbayHTTPClient(baseURL, certSHA)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/api/v1/volumes", nil)
 	if err != nil {
 		return nil, err
@@ -457,12 +473,12 @@ func lanbayVolumes(ctx context.Context, baseURL, sessionCookie string) ([]map[st
 	return out.Volumes, nil
 }
 
-func runVerifyLogin(ctx context.Context, baseURL, password string) error {
-	cookie, err := lanbayLogin(ctx, baseURL, password)
+func runVerifyLogin(ctx context.Context, baseURL, password, certSHA string) error {
+	cookie, err := lanbayLogin(ctx, baseURL, password, certSHA)
 	if err != nil {
 		return err
 	}
-	vols, err := lanbayVolumes(ctx, baseURL, cookie)
+	vols, err := lanbayVolumes(ctx, baseURL, cookie, certSHA)
 	if err != nil {
 		return err
 	}
@@ -500,7 +516,7 @@ var summaryCriteria = []summaryCriterion{
 	{"JCB-479", "M5", "uninstall", "Desinstalación de instaladores"},
 }
 
-func generateSummary(resultsDir, lanbayURL, password string) error {
+func generateSummary(resultsDir, lanbayURL, password, certSHA string) error {
 	results := map[string]map[string]any{}
 	filepath.WalkDir(resultsDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".json") {
@@ -547,11 +563,11 @@ func generateSummary(resultsDir, lanbayURL, password string) error {
 	// Login desde la Mac
 	if lanbayURL != "" && password != "" {
 		b.WriteString("\n## Login desde la Mac (JCB-468 paso 3)\n\n")
-		cookie, err := lanbayLogin(context.Background(), lanbayURL, password)
+		cookie, err := lanbayLogin(context.Background(), lanbayURL, password, certSHA)
 		if err != nil {
 			fmt.Fprintf(&b, "- Resultado: **fail** (%s)\n", err.Error())
 		} else {
-			vols, err := lanbayVolumes(context.Background(), lanbayURL, cookie)
+			vols, err := lanbayVolumes(context.Background(), lanbayURL, cookie, certSHA)
 			if err != nil {
 				fmt.Fprintf(&b, "- Resultado: **fail** (%s)\n", err.Error())
 			} else {
@@ -565,6 +581,9 @@ func generateSummary(resultsDir, lanbayURL, password string) error {
 	return os.WriteFile(out, []byte(b.String()), 0644)
 }
 
+const maxExtractEntries = 1000
+const maxExtractBytes int64 = 256 << 20
+
 func extractResultsZip(zipPath, dest string) error {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
@@ -574,11 +593,24 @@ func extractResultsZip(zipPath, dest string) error {
 	if err := os.MkdirAll(dest, 0755); err != nil {
 		return err
 	}
+	if len(r.File) > maxExtractEntries {
+		return fmt.Errorf("too many entries: %d", len(r.File))
+	}
+	var total int64
 	for _, f := range r.File {
-		target := filepath.Join(dest, f.Name)
+		if !filepath.IsLocal(f.Name) {
+			return fmt.Errorf("unsafe path in zip: %s", f.Name)
+		}
 		if f.FileInfo().IsDir() {
-			os.MkdirAll(target, 0755)
 			continue
+		}
+		if !f.FileInfo().Mode().IsRegular() {
+			return fmt.Errorf("non-regular file in zip: %s", f.Name)
+		}
+		target := filepath.Join(dest, f.Name)
+		rel, err := filepath.Rel(dest, target)
+		if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+			return fmt.Errorf("unsafe path in zip: %s", f.Name)
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 			return err
@@ -587,16 +619,20 @@ func extractResultsZip(zipPath, dest string) error {
 		if err != nil {
 			return err
 		}
-		out, err := os.Create(target)
+		out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 		if err != nil {
 			rc.Close()
 			return err
 		}
-		_, copyErr := io.Copy(out, rc)
+		n, copyErr := io.Copy(out, io.LimitReader(rc, maxExtractBytes-total+1))
 		out.Close()
 		rc.Close()
 		if copyErr != nil {
 			return copyErr
+		}
+		total += n
+		if total > maxExtractBytes {
+			return fmt.Errorf("extracted size exceeds limit")
 		}
 	}
 	return nil

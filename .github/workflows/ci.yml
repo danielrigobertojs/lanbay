@@ -80,7 +80,7 @@ jobs:
       - name: Download, verify, extract, and return results
         shell: pwsh
         run: |
-          $server = Start-Process go -ArgumentList 'run','./tools/kitserver','-mode','verify','-listen','127.0.0.1:8766','-idle-timeout','2m' -NoNewWindow -PassThru -RedirectStandardOutput kitserver.out -RedirectStandardError kitserver.err
+          $server = Start-Process go -ArgumentList 'run','./tools/kitserver','-mode','verify','-kit','dist/lanbay-verify-kit.zip','-listen','127.0.0.1:8766','-idle-timeout','2m' -NoNewWindow -PassThru -RedirectStandardOutput kitserver.out -RedirectStandardError kitserver.err
           for ($i = 0; $i -lt 40 -and -not (Test-Path kitserver.out); $i++) { Start-Sleep -Milliseconds 250 }
           for ($i = 0; $i -lt 40; $i++) {
             $line = if (Test-Path kitserver.out) { Get-Content kitserver.out -Raw } else { '' }
