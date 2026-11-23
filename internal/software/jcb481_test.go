@@ -114,7 +114,7 @@ func TestJCB481HashChangedRejected(t *testing.T) {
 	if err := svc.Registry.Add(ctx, ManagedApp{ID: "u3", Source: SourceUpload, DisplayName: "App", InstalledAt: "now", UninstallInfo: string(b), Status: StatusInstalled}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.UninstallUploaded(ctx, "u3", false); err == nil || !strings.Contains(err.Error(), "manipulado") {
+	if _, err := svc.UninstallUploaded(ctx, "u3", true); err == nil || !strings.Contains(err.Error(), "manipulado") {
 		t.Fatalf("expected hash mismatch error, got %v", err)
 	}
 }
