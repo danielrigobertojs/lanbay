@@ -53,9 +53,10 @@ jobs:
       - name: Download, verify, extract, and return volume results
         shell: pwsh
         run: |
-          $server = Start-Process go -ArgumentList 'run','./tools/kitserver','-listen','127.0.0.1:8765','-idle-timeout','2m' -NoNewWindow -PassThru -RedirectStandardOutput kitserver.out -RedirectStandardError kitserver.err
-          for ($i = 0; $i -lt 40 -and -not (Test-Path kitserver.out); $i++) { Start-Sleep -Milliseconds 250 }
-          for ($i = 0; $i -lt 40; $i++) {
+          go build -o kitserver.exe ./tools/kitserver
+          $server = Start-Process ./kitserver.exe -ArgumentList '-listen','127.0.0.1:8765','-idle-timeout','2m' -NoNewWindow -PassThru -RedirectStandardOutput kitserver.out -RedirectStandardError kitserver.err
+          for ($i = 0; $i -lt 120 -and -not (Test-Path kitserver.out); $i++) { Start-Sleep -Milliseconds 250 }
+          for ($i = 0; $i -lt 120; $i++) {
             $line = if (Test-Path kitserver.out) { Get-Content kitserver.out -Raw } else { '' }
             if ($line -match "http://127.0.0.1:8765/[0-9a-f]+/bootstrap.ps1") { $bootstrapURL = $Matches[0]; break }
             Start-Sleep -Milliseconds 250
@@ -80,9 +81,10 @@ jobs:
       - name: Download, verify, extract, and return results
         shell: pwsh
         run: |
-          $server = Start-Process go -ArgumentList 'run','./tools/kitserver','-mode','verify','-kit','dist/lanbay-verify-kit.zip','-listen','127.0.0.1:8766','-idle-timeout','2m' -NoNewWindow -PassThru -RedirectStandardOutput kitserver.out -RedirectStandardError kitserver.err
-          for ($i = 0; $i -lt 40 -and -not (Test-Path kitserver.out); $i++) { Start-Sleep -Milliseconds 250 }
-          for ($i = 0; $i -lt 40; $i++) {
+          go build -o kitserver.exe ./tools/kitserver
+          $server = Start-Process ./kitserver.exe -ArgumentList '-mode','verify','-kit','dist/lanbay-verify-kit.zip','-listen','127.0.0.1:8766','-idle-timeout','2m' -NoNewWindow -PassThru -RedirectStandardOutput kitserver.out -RedirectStandardError kitserver.err
+          for ($i = 0; $i -lt 120 -and -not (Test-Path kitserver.out); $i++) { Start-Sleep -Milliseconds 250 }
+          for ($i = 0; $i -lt 120; $i++) {
             $line = if (Test-Path kitserver.out) { Get-Content kitserver.out -Raw } else { '' }
             if ($line -match "http://127.0.0.1:8766/[0-9a-f]+/bootstrap.ps1") { $bootstrapURL = $Matches[0]; break }
             Start-Sleep -Milliseconds 250
