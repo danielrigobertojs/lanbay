@@ -3,8 +3,8 @@ package server
 
 import (
 	"bytes"
-	"github.com/danielrigobertojs/lanbay/internal/auth"
 	"context"
+	"github.com/danielrigobertojs/lanbay/internal/auth"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
