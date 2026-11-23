@@ -36,3 +36,8 @@ check: third-party
 	gofmt -l .
 	go vet ./...
 	bash scripts/check-spdx.sh
+
+release: web
+	mkdir -p dist
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-X main.version=$(VERSION)" -o dist/lanbay.exe ./cmd/lanbay
+	cd dist && (command -v shasum >/dev/null 2>&1 && shasum -a 256 lanbay.exe || sha256sum lanbay.exe) > lanbay.exe.sha256

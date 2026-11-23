@@ -20,6 +20,51 @@ dist/lanbay.exe version
 
 `make windows` cross-compiles with `CGO_ENABLED=0` for `windows/amd64`.
 
+## Installation (Windows)
+
+Run from an elevated PowerShell or Command Prompt:
+
+```text
+lanbay.exe install
+```
+
+`install` creates `%ProgramData%\Lanbay` with an Administrators + SYSTEM-only ACL,
+registers the `Lanbay` scheduled task (at logon, interactive, highest privileges,
+hidden) and adds an inbound firewall rule for the configured HTTPS port **only on
+the Private profile**. It also generates the initial administrator password and
+writes it to `%ProgramData%\Lanbay\initial-password.txt` (protected). Change it
+after the first login.
+
+Lanbay starts only after you sign in; there is no panel before logon. Drive
+letters created with `subst` are not shown (see ADR-006).
+
+To remove it:
+
+```text
+lanbay.exe uninstall
+```
+
+`uninstall` removes the scheduled task and the firewall rule and asks whether to
+keep the data directory. Managed applications installed by the panel are **not**
+uninstalled.
+
+## Trusting the certificate
+
+Lanbay uses a self-signed TLS certificate. Its SHA-256 fingerprint is printed on
+startup and stored in the panel. To avoid browser warnings:
+
+- **macOS:** open Keychain Access, import `tls-cert.pem` into the System
+  keychain, then set it to "Always Trust" for SSL.
+- **iOS/iPadOS:** install the profile, then enable full trust under
+  Settings > General > About > Certificate Trust Settings.
+- **Windows (client):** import into "Trusted Root Certification Authorities".
+
+## Windows SmartScreen / Defender
+
+The binary is not code-signed. Windows SmartScreen and Defender may warn about
+an unknown publisher; choose "More info" > "Run anyway" only after verifying the
+SHA-256 checksum from the release. See `SECURITY.md`.
+
 ## Windows M0 bootstrap kit
 
 Before Lanbay is installed, its M0 spikes must be run on the target Windows

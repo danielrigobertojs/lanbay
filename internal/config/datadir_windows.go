@@ -243,3 +243,7 @@ func rejectUnsafeRoot(path string) error {
 	}
 	return nil
 }
+
+// RemoveDataDir deletes the Lanbay data directory during uninstall when the
+// operator chooses not to keep the data.
+func RemoveDataDir(path string) error { return os.RemoveAll(path) }
