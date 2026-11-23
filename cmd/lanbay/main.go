@@ -278,6 +278,7 @@ func runUninstall(ctx context.Context) {
 	if err := platform.RemoveInstallDir(); err != nil {
 		slog.Warn("remove install dir", "error", err)
 	}
+	platform.MarkInstalledBinaryForDeletion()
 	if !keep {
 		if err := config.RemoveDataDir(c.DataDir); err != nil {
 			fatal(fmt.Errorf("remove data directory: %w", err))

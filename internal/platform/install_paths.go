@@ -3,7 +3,6 @@ package platform
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 )
 
@@ -11,12 +10,12 @@ import (
 // its own executable so the elevated scheduled task cannot be replaced by an
 // unprivileged process.
 func InstallBinDir(programFiles string) string {
-	return filepath.Join(programFiles, "Lanbay")
+	return programFiles + `\` + "Lanbay"
 }
 
 // InstallBinPath returns the full path of the executable installed for the task.
 func InstallBinPath(programFiles string) string {
-	return filepath.Join(InstallBinDir(programFiles), "lanbay.exe")
+	return InstallBinDir(programFiles) + `\` + "lanbay.exe"
 }
 
 // IsTrustedTrustee reports whether the given SID or account name is allowed to

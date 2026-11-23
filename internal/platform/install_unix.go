@@ -28,4 +28,8 @@ func AddFirewallRule(port int) error {
 func RemoveFirewallRule() error {
 	return errors.New("firewall rule management is only supported on Windows")
 }
-func StopRunningInstance() {}
+func StopRunningInstance()            {}
+func MarkInstalledBinaryForDeletion() {}
+func ScheduleInstallBinaryDeletion()  {}
+func ScheduleBinaryDeletionOnReboot() {}
+func DeleteInstalledBinaryOnReboot()  {}

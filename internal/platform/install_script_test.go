@@ -2,7 +2,6 @@
 package platform
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -18,7 +17,7 @@ func TestScheduledTaskScriptUsesEnvVar(t *testing.T) {
 }
 
 func TestInstallBinPath(t *testing.T) {
-	if got := InstallBinPath(`C:\Program Files`); got != filepath.Join(`C:\Program Files`, "Lanbay", "lanbay.exe") {
+	if got := InstallBinPath(`C:\Program Files`); got != `C:\Program Files\Lanbay\lanbay.exe` {
 		t.Fatalf("unexpected path: %s", got)
 	}
 }
@@ -95,4 +94,23 @@ func containsAll(s string, subs ...string) bool {
 		}
 	}
 	return true
+}
+
+func TestIsUnderInstallDir(t *testing.T) {
+	pf := `C:\Program Files`
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{`C:\Program Files\Lanbay\lanbay.exe`, true},
+		{`c:\program files\lanbay\lanbay.exe`, true},
+		{`C:\Program Files\LanbayX\lanbay.exe`, false},
+		{`C:\Users\foo\lanbay.exe`, false},
+		{`D:\Program Files\Lanbay\lanbay.exe`, false},
+	}
+	for _, c := range cases {
+		if got := IsUnderInstallDir(c.path, pf); got != c.want {
+			t.Errorf("IsUnderInstallDir(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
 }

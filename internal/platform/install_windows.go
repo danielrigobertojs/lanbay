@@ -189,22 +189,36 @@ func RemoveFirewallRule() error {
 }
 
 // StopRunningInstance stops the scheduled task and any other lanbay.exe
-// instances, without killing the uninstall process itself.
+// instances, without killing the uninstall process itself. It never schedules
+// the deletion of the running executable.
 func StopRunningInstance() {
 	for _, args := range StopRunningInstanceCommands(os.Getpid()) {
 		cmd := exec.Command(args[0], args[1:]...)
 		_ = cmd.Run()
 	}
-	// If uninstall runs from the installed binary, it cannot be deleted now;
-	// mark it for deletion on the next reboot.
-	if pf, err := ProgramFilesDir(); err == nil {
-		if exe, err := os.Executable(); err == nil && IsUnderInstallDir(exe, pf) {
-			if p, err := windows.UTF16PtrFromString(exe); err == nil {
-				_ = windows.MoveFileEx(p, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
-			}
-		}
+}
+
+// MarkInstalledBinaryForDeletion schedules the running executable for deletion
+// on the next reboot when it lives under %ProgramFiles%\Lanbay. It is only
+// meant to be called from runUninstall.
+func MarkInstalledBinaryForDeletion() {
+	pf, err := ProgramFilesDir()
+	if err != nil {
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil || !IsUnderInstallDir(exe, pf) {
+		return
+	}
+	if p, err := windows.UTF16PtrFromString(exe); err == nil {
+		_ = windows.MoveFileEx(p, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
 	}
 }
+
+// Aliases for callers/tests that use a different name.
+func ScheduleInstallBinaryDeletion()  { MarkInstalledBinaryForDeletion() }
+func ScheduleBinaryDeletionOnReboot() { MarkInstalledBinaryForDeletion() }
+func DeleteInstalledBinaryOnReboot()  { MarkInstalledBinaryForDeletion() }
 
 func containsNotFound(s string) bool {
 	low := strings.ToLower(s)
