@@ -94,3 +94,27 @@ Pendiente de verificación en la Ally; no se declara verificado desde macOS.
 
 1. Reiniciar la Ally e iniciar sesión; confirmar que el panel responde en la LAN.
 2. Suspender y reanudar; confirmar que el panel sigue respondiendo.
+
+## Kit de verificación (JCB-485)
+
+Vía principal para M1, M4 y M5. En la Mac:
+
+```
+make ally-verify-kit
+go run ./tools/kitserver -mode verify -kit dist/lanbay-verify-kit.zip -listen :8765
+```
+
+En la Ally, en PowerShell elevado, pegar la línea impresa por kitserver (`irm 'http://<mac>:<port>/<token>/bootstrap.ps1' | iex`). El kit ejecuta `verify.ps1` por secciones y devuelve `out/` a la Mac.
+
+### Paso 5 de JCB-468 (login desde la Mac)
+
+Tras recibir los resultados, desde la Mac se valida el login de punta a punta contra el Lanbay de la Ally:
+
+```
+go run ./tools/kitserver -verify-login -lanbay-url https://<ally>:<port> -lanbay-password '<password>'
+```
+
+Debe imprimir el inventario de volúmenes. Esto demuestra el filtro LAN y la autenticación de punta a punta.
+
+
+Los resultados se consolidan en `summary.md` (JCB-485) relacionando cada criterio de JCB-468, JCB-476 y JCB-479 con su evidencia.

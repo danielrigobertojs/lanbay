@@ -4,11 +4,18 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
+
+	"github.com/danielrigobertojs/lanbay/internal/config"
+	lanbayserver "github.com/danielrigobertojs/lanbay/internal/server"
+	"github.com/danielrigobertojs/lanbay/internal/store"
+	"github.com/danielrigobertojs/lanbay/internal/volumes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -215,5 +222,62 @@ func TestAddressesForInterfaceScopesLinkLocalIPv6(t *testing.T) {
 	v4, v6 := addressesForInterface(net.Interface{Name: "en0"}, addresses)
 	if v4 != nil || v6 == nil || v6.Zone != "en0" {
 		t.Fatalf("addresses = %#v %#v", v4, v6)
+	}
+}
+
+type testVolumes []volumes.Volume
+
+func (v testVolumes) List(context.Context) ([]volumes.Volume, error) { return v, nil }
+
+func TestVerifyLoginEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(context.Background(), filepath.Join(dir, "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c := config.Default(dir)
+	c.AllowedHosts = []string{"localhost", "::1"}
+	srv := lanbayserver.New(c, db, testVolumes{{ID: "C:\\"}}, "test")
+	if err := srv.SetPassword(context.Background(), "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewTLSServer(srv.Handler())
+	defer ts.Close()
+	// override TLS client skip verify already in lanbayHTTPClient
+	if err := runVerifyLogin(context.Background(), ts.URL, "correct horse battery"); err != nil {
+		t.Fatalf("verify login failed: %v", err)
+	}
+}
+
+func TestGenerateSummaryFromSyntheticResults(t *testing.T) {
+	root := t.TempDir()
+	// create a couple of result JSON files
+	for _, spec := range []struct{ section, name, status string }{
+		{"M1", "icacls", "pass"},
+		{"M4", "install", "pass"},
+		{"M5", "b3-staging-dir", "pass"},
+	} {
+		dir := filepath.Join(root, spec.section)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(map[string]any{"section": spec.section, "name": spec.name, "status": spec.status, "evidence": "ev"})
+		if err := os.WriteFile(filepath.Join(dir, spec.name+".json"), b, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := generateSummary(root, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "summary.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	for _, needle := range []string{"# Summary", "pass", "sin dato", "M1", "M4", "M5"} {
+		if !strings.Contains(s, needle) {
+			t.Fatalf("summary missing %q", needle)
+		}
 	}
 }
