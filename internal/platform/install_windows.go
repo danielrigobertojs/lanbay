@@ -119,7 +119,7 @@ func untrustedWriters(path string) ([]string, error) {
 			Trustee:     sidStr,
 			Mask:        uint32(ace.Mask),
 			InheritOnly: ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0,
-			Allowed:     ace.Header.AceType == windows.ACCESS_ALLOWED_ACE_TYPE,
+			Allowed:     ace.Header.AceType == windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceType == 9, // ACCESS_ALLOWED_CALLBACK_ACE
 		})
 	}
 	return UntrustedWritersFromEntries(entries), nil
@@ -213,12 +213,12 @@ func MarkInstalledBinaryForDeletion() {
 	if p, err := windows.UTF16PtrFromString(exe); err == nil {
 		_ = windows.MoveFileEx(p, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
 	}
+	if pf, err := ProgramFilesDir(); err == nil {
+		if p, err := windows.UTF16PtrFromString(InstallBinDir(pf)); err == nil {
+			_ = windows.MoveFileEx(p, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
+		}
+	}
 }
-
-// Aliases for callers/tests that use a different name.
-func ScheduleInstallBinaryDeletion()  { MarkInstalledBinaryForDeletion() }
-func ScheduleBinaryDeletionOnReboot() { MarkInstalledBinaryForDeletion() }
-func DeleteInstalledBinaryOnReboot()  { MarkInstalledBinaryForDeletion() }
 
 func containsNotFound(s string) bool {
 	low := strings.ToLower(s)

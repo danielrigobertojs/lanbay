@@ -37,7 +37,7 @@ contraseña inicial del administrador y la escribe en
 primer inicio de sesión.
 
 Lanbay arranca solo tras iniciar sesión; no hay panel antes del inicio de
-sesión. La tarea programada ejecuta `%ProgramFiles%\Lanbay\lanbay.exe`; verifica con `icacls` que `Users` y `Authenticated Users` no tienen permiso de escritura. Tras desinstalar, puede quedar un directorio vacío `%ProgramFiles%\Lanbay` hasta el reinicio si el binario estaba en ejecución. Las letras de unidad creadas con `subst` no se muestran (ver ADR-006).
+sesión. La tarea programada ejecuta `%ProgramFiles%\Lanbay\lanbay.exe`; verifica con `icacls` que `Users` y `Authenticated Users` no tienen permiso de escritura. Tras desinstalar, puede quedar un directorio vacío `%ProgramFiles%\Lanbay` hasta el reinicio si el binario estaba en ejecución. Reinicia antes de reinstalar para evitar que el borrado pendiente elimine el nuevo binario. Las letras de unidad creadas con `subst` no se muestran (ver ADR-006).
 
 Para desinstalar:
 
