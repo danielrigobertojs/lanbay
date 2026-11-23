@@ -20,6 +20,53 @@ dist/lanbay.exe version
 
 El objetivo `windows` usa `CGO_ENABLED=0` y genera `windows/amd64`.
 
+## Instalación (Windows)
+
+Ejecuta desde PowerShell o Command Prompt elevado:
+
+```text
+lanbay.exe install
+```
+
+`install` crea `%ProgramData%\Lanbay` con una ACL solo para Administrators y
+SYSTEM, registra la tarea programada `Lanbay` (al iniciar sesión, interactiva,
+con privilegios máximos y oculta) y añade una regla de firewall entrante para
+el puerto HTTPS configurado **solo en el perfil Privado**. También genera la
+contraseña inicial del administrador y la escribe en
+`%ProgramData%\Lanbay\initial-password.txt` (protegido). Cámbiala tras el
+primer inicio de sesión.
+
+Lanbay arranca solo tras iniciar sesión; no hay panel antes del inicio de
+sesión. Las letras de unidad creadas con `subst` no se muestran (ver ADR-006).
+
+Para desinstalar:
+
+```text
+lanbay.exe uninstall
+```
+
+`uninstall` elimina la tarea programada y la regla de firewall, y pregunta si se
+conserva el directorio de datos. Las aplicaciones gestionadas instaladas por el
+panel **no** se desinstalan.
+
+## Confianza en el certificado
+
+Lanbay usa un certificado TLS autofirmado. Su huella SHA-256 se imprime al
+arrancar y se muestra en el panel. Para evitar avisos del navegador:
+
+- **macOS:** importa `tls-cert.pem` en el llavero del Sistema y márcalo como
+  "Confiar siempre" para SSL.
+- **iOS/iPadOS:** instala el perfil y activa la confianza completa en
+  Ajustes > General > Información > Ajustes de confianza de certificados.
+- **Windows (cliente):** impórtalo en "Entidades de certificación raíz de
+  confianza".
+
+## SmartScreen / Defender de Windows
+
+El binario no está firmado. SmartScreen y Defender pueden advertir sobre un
+publicador desconocido; elige "Más información" > "Ejecutar de todas formas"
+solo tras verificar el checksum SHA-256 de la release. Ver `SECURITY.md`.
+
 ## Kit de bootstrap M0 para Windows
 
 Antes de instalar Lanbay se deben ejecutar sus spikes M0 en el equipo Windows
@@ -49,6 +96,16 @@ releases de Lanbay.
 
 Consulta la [guía de spikes M0](spikes/README.md) para prerrequisitos, la
 alternativa manual, limpieza y la evidencia que aún debe obtenerse en Windows.
+
+## Dependencias
+
+- `modernc.org/sqlite`: driver SQLite en Go puro.
+- `golang.org/x/sys/windows`: bindings de la API de Windows.
+- `golang.org/x/crypto/argon2`: hash de contraseña del administrador resistente a memoria.
+- Svelte: interfaz web compilada localmente.
+
+La atribución completa generada está en `THIRD_PARTY_LICENSES.md` y se nombra en
+`lanbay version`.
 
 ## Seguridad y licencia
 

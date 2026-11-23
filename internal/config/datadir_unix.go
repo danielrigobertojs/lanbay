@@ -23,3 +23,7 @@ func ensureDataDir(path string) error { return os.MkdirAll(path, 0700) }
 
 // ProtectFile applies the development-platform owner-only mode.
 func ProtectFile(path string) error { return os.Chmod(path, 0600) }
+
+// RemoveDataDir deletes the Lanbay data directory during uninstall when the
+// operator chooses not to keep the data.
+func RemoveDataDir(path string) error { return os.RemoveAll(path) }

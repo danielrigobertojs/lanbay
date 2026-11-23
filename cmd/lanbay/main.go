@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,9 +31,18 @@ var version = "dev"
 
 func main() {
 	args := os.Args[1:]
-	if len(args) > 0 && args[0] == "version" {
-		fmt.Print(license.Text(version))
-		return
+	if len(args) > 0 {
+		switch args[0] {
+		case "version":
+			fmt.Print(license.Text(version))
+			return
+		case "install":
+			runInstall(context.Background())
+			return
+		case "uninstall":
+			runUninstall(context.Background())
+			return
+		}
 	}
 	ctx := context.Background()
 	c, err := config.Load(config.DefaultDataDir())
@@ -168,3 +180,101 @@ type limitedConn struct {
 func (c *limitedConn) Close() error { err := c.Conn.Close(); c.once.Do(c.release); return err }
 
 func fatal(err error) { slog.Error("Lanbay stopped", "error", err); os.Exit(1) }
+
+func runInstall(ctx context.Context) {
+	if !platform.IsWindows() {
+		fatal(errors.New("lanbay install is only supported on Windows"))
+	}
+	if !platform.IsElevated() {
+		fatal(errors.New("lanbay install must run as Administrator"))
+	}
+	c, err := config.Load(config.DefaultDataDir())
+	if err != nil {
+		fatal(err)
+	}
+	db, err := store.Open(ctx, filepath.Join(c.DataDir, "lanbay.sqlite"))
+	if err != nil {
+		fatal(err)
+	}
+	defer db.Close()
+	app := server.New(c, db, volumes.NewProvider(), version)
+	sw, err := software.NewService(db, software.NewBackendWithDataDir(c.DataDir), app.Jobs(), c.DataDir)
+	if err != nil {
+		fatal(err)
+	}
+	app.SetSoftware(sw)
+	initial, err := app.Initialize(ctx)
+	if err != nil {
+		fatal(err)
+	}
+	if initial != "" {
+		initialPath := filepath.Join(c.DataDir, "initial-password.txt")
+		if err := os.WriteFile(initialPath, []byte(initial+"\n"), 0600); err != nil {
+			fatal(fmt.Errorf("guardar contraseña inicial: %w", err))
+		}
+		if err := config.ProtectFile(initialPath); err != nil {
+			fatal(fmt.Errorf("proteger contraseña inicial: %w", err))
+		}
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		fatal(err)
+	}
+	if err := platform.InstallScheduledTask(exe); err != nil {
+		fatal(err)
+	}
+	port := listenPort(c.Listen)
+	if err := platform.AddFirewallRule(port); err != nil {
+		fatal(err)
+	}
+	slog.Info("Lanbay installed", "data_dir", c.DataDir, "listen", c.Listen)
+	fmt.Printf("Lanbay installed. Data directory: %s\n", c.DataDir)
+	if initial != "" {
+		fmt.Printf("Initial password written to %s (change it after first login).\n", filepath.Join(c.DataDir, "initial-password.txt"))
+	}
+}
+
+func runUninstall(ctx context.Context) {
+	if !platform.IsWindows() {
+		fatal(errors.New("lanbay uninstall is only supported on Windows"))
+	}
+	if !platform.IsElevated() {
+		fatal(errors.New("lanbay uninstall must run as Administrator"))
+	}
+	dataDir := config.DefaultDataDir()
+	c, _ := config.Load(dataDir)
+	if c.DataDir == "" {
+		c = config.Default(dataDir)
+	}
+	fmt.Printf("Keep data directory %s? [y/N]: ", c.DataDir)
+	reader := bufio.NewReader(os.Stdin)
+	line, _ := reader.ReadString('\n')
+	keep := strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "y")
+	if err := platform.UninstallScheduledTask(); err != nil {
+		slog.Warn("remove scheduled task", "error", err)
+	}
+	if err := platform.RemoveFirewallRule(); err != nil {
+		slog.Warn("remove firewall rule", "error", err)
+	}
+	if !keep {
+		if err := config.RemoveDataDir(c.DataDir); err != nil {
+			fatal(fmt.Errorf("remove data directory: %w", err))
+		}
+		fmt.Println("Data directory removed.")
+	} else {
+		fmt.Println("Data directory kept.")
+	}
+	fmt.Println("Lanbay uninstalled. Managed applications were not removed.")
+}
+
+func listenPort(listen string) int {
+	_, portStr, err := net.SplitHostPort(listen)
+	if err != nil {
+		return 8443
+	}
+	p, err := strconv.Atoi(portStr)
+	if err != nil || p <= 0 {
+		return 8443
+	}
+	return p
+}

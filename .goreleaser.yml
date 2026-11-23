@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+version: 2
+project_name: lanbay
+before:
+  hooks:
+    - npm --prefix web ci
+    - npm --prefix web run build
+builds:
+  - id: lanbay-windows
+    main: ./cmd/lanbay
+    binary: lanbay
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+archives:
+  - id: lanbay
+    format: zip
+    name_template: "lanbay_{{.Version}}_{{.Os}}_{{.Arch}}"
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+release:
+  github:
+    owner: danielrigobertojs
+    name: lanbay
