@@ -3,7 +3,11 @@
 
 package software
 
-import "context"
+import (
+	"context"
+	"errors"
+	"os"
+)
 
 type AuthenticodeInfo struct {
 	Signed  bool   `json:"signed"`
@@ -14,6 +18,13 @@ type AuthenticodeInfo struct {
 }
 
 func VerifyAuthenticode(ctx context.Context, path string) (AuthenticodeInfo, error) {
+	return AuthenticodeInfo{Signed: false, Valid: false, Status: "Unsigned", Message: "Authenticode solo disponible en Windows"}, nil
+}
+
+func VerifyAuthenticodeHandle(ctx context.Context, f *os.File) (AuthenticodeInfo, error) {
+	if f == nil {
+		return AuthenticodeInfo{}, errors.New("nil file")
+	}
 	return AuthenticodeInfo{Signed: false, Valid: false, Status: "Unsigned", Message: "Authenticode solo disponible en Windows"}, nil
 }
 

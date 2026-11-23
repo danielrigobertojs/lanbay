@@ -497,19 +497,8 @@ func (s *Service) InstallUploaded(ctx context.Context, opts InstallUploadOptions
 			retained.Close()
 			return err
 		}
-		if info.Authenticode.Signed && !info.Authenticode.Valid {
-			return fmt.Errorf("firma Authenticode inválida o manipulada")
-		}
-		if info.Authenticode.Status != "Valid" && info.Authenticode.Status != "Unsigned" && info.Authenticode.Status != "RevocationUnchecked" && !info.Authenticode.Signed {
-			return fmt.Errorf("estado Authenticode desconocido o no verificable")
-		}
-		if info.Authenticode.Status == "Unsigned" || info.Authenticode.Status == "RevocationUnchecked" {
-			if !opts.ConfirmUnsigned {
-				return fmt.Errorf("instalador sin firma o revocación no comprobable: confirmación requerida")
-			}
-			if opts.ConfirmName == "" || opts.ConfirmName != filepath.Base(opts.Path) {
-				return fmt.Errorf("confirmación de nombre incorrecta")
-			}
+		if err := decideAuthenticode(info.Authenticode, opts); err != nil {
+			return err
 		}
 		before, _ := SnapshotUninstallKeys(ctx)
 		ext := strings.ToLower(filepath.Ext(opts.Path))
@@ -815,4 +804,32 @@ func (s *Service) StageInstaller(data []byte, originalName string) (string, erro
 
 func (s *Service) StageInstallerStream(originalName string, r interface{ Read([]byte) (int, error) }) (string, error) {
 	return StageInstallerStream(s.StagingDir(), originalName, r)
+}
+
+// decideAuthenticode enforces the Authenticode policy for an uploaded installer.
+func decideAuthenticode(info AuthenticodeInfo, opts InstallUploadOptions) error {
+	if info.Status == "RevocationUnchecked" {
+		if !opts.ConfirmUnsigned {
+			return fmt.Errorf("revocación no comprobable: confirmación requerida")
+		}
+		if opts.ConfirmName == "" || opts.ConfirmName != filepath.Base(opts.Path) {
+			return fmt.Errorf("confirmación de nombre incorrecta")
+		}
+		return nil
+	}
+	if info.Signed && !info.Valid {
+		return fmt.Errorf("firma Authenticode inválida o manipulada")
+	}
+	if info.Status != "Valid" && info.Status != "Unsigned" && !info.Signed {
+		return fmt.Errorf("estado Authenticode desconocido o no verificable")
+	}
+	if info.Status == "Unsigned" {
+		if !opts.ConfirmUnsigned {
+			return fmt.Errorf("instalador sin firma: confirmación requerida")
+		}
+		if opts.ConfirmName == "" || opts.ConfirmName != filepath.Base(opts.Path) {
+			return fmt.Errorf("confirmación de nombre incorrecta")
+		}
+	}
+	return nil
 }
