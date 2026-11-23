@@ -882,9 +882,18 @@ func (s *Server) softwareStageInstaller(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "software no disponible", http.StatusServiceUnavailable)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 128<<20)
+	limit := s.config.MaxUploadBytes
+	if limit <= 0 {
+		limit = 128 << 20
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	mr, err := r.MultipartReader()
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "solicitud demasiado grande", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "solicitud inválida", 400)
 		return
 	}
@@ -897,6 +906,17 @@ func (s *Server) softwareStageInstaller(w http.ResponseWriter, r *http.Request) 
 			break
 		}
 		if err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				if filePart != nil {
+					filePart.Close()
+				}
+				http.Error(w, "solicitud demasiado grande", http.StatusRequestEntityTooLarge)
+				return
+			}
+			if filePart != nil {
+				filePart.Close()
+			}
 			http.Error(w, "solicitud inválida", 400)
 			return
 		}
@@ -931,6 +951,11 @@ func (s *Server) softwareStageInstaller(w http.ResponseWriter, r *http.Request) 
 	defer filePart.Close()
 	name, err := s.software.StageInstallerStream(filePart.FileName(), filePart)
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "solicitud demasiado grande", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, err.Error(), 400)
 		return
 	}

@@ -21,7 +21,7 @@ func ReadMSIProductCode(path string) (string, error) {
 		return "", err
 	}
 	var h uintptr
-	r, _, _ := open.Call(uintptr(unsafe.Pointer(pPath)), 0, uintptr(unsafe.Pointer(&h)))
+	r, _, _ := open.Call(uintptr(unsafe.Pointer(pPath)), 1, uintptr(unsafe.Pointer(&h)))
 	if r != 0 {
 		return "", fmt.Errorf("MsiOpenPackageExW returned %d", r)
 	}

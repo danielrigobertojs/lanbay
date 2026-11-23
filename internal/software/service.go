@@ -772,6 +772,23 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string, confi
 	return j.ID, nil
 }
 
+// isUserWritablePath reports whether the current user can write to the
+// directory containing path, without relying on USERPROFILE.
+func isUserWritablePath(path string) bool {
+	if path == "" {
+		return false
+	}
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, ".lanbay-writetest-*")
+	if err != nil {
+		return false
+	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
+	return true
+}
+
 // splitCommand splits a command line into argv, honouring double-quoted
 // segments with spaces (e.g. "C:\Program Files\x\uninstall.exe" /S).
 func splitCommand(line string) []string {
