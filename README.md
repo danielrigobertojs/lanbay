@@ -35,7 +35,7 @@ the Private profile**. It also generates the initial administrator password and
 writes it to `%ProgramData%\Lanbay\initial-password.txt` (protected). Change it
 after the first login.
 
-Lanbay starts only after you sign in; there is no panel before logon. Drive
+Lanbay starts only after you sign in; there is no panel before logon. The scheduled task runs `%ProgramFiles%\\Lanbay\\lanbay.exe`; verify with `icacls` that `Users` and `Authenticated Users` have no write access. Drive
 letters created with `subst` are not shown (see ADR-006).
 
 To remove it:

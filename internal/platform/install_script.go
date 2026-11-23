@@ -3,16 +3,14 @@
 // the script construction can be unit-tested on any platform.
 package platform
 
-import "strings"
-
 // scheduledTaskScript builds the PowerShell snippet that registers the Lanbay
-// scheduled task. exePath is embedded as a single-quoted PowerShell string, with
-// any embedded single quote doubled per PowerShell's escaping rules, so a path
-// containing an apostrophe cannot break out of the string.
-func scheduledTaskScript(exePath string) string {
-	escaped := strings.ReplaceAll(exePath, "'", "''")
+// scheduled task. The executable path is NOT embedded in the script: it is
+// passed through the LANBAY_EXE environment variable, so neither quoting nor
+// typographic-quote escaping can break out of a string.
+func scheduledTaskScript() string {
 	return "$ErrorActionPreference='Stop'\n" +
-		"$exe='" + escaped + "'\n" +
+		"$exe=$env:LANBAY_EXE\n" +
+		"if ([string]::IsNullOrWhiteSpace($exe)) { throw 'LANBAY_EXE is not set' }\n" +
 		"$principal=New-ScheduledTaskPrincipal -UserId \"$env:USERDOMAIN\\$env:USERNAME\" -LogonType Interactive -RunLevel Highest\n" +
 		"$action=New-ScheduledTaskAction -Execute $exe\n" +
 		"$trigger=New-ScheduledTaskTrigger -AtLogOn -User \"$env:USERDOMAIN\\$env:USERNAME\"\n" +
