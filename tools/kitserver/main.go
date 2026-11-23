@@ -3,10 +3,14 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,15 +25,18 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/danielrigobertojs/lanbay/internal/auth"
 )
 
 const defaultMaxResultBytes int64 = 64 << 20
 
 type server struct {
-	token, kitPath, kitSHA256, resultsDir string
-	maxResultBytes                        int64
-	inactivity                            time.Duration
-	logger                                *slog.Logger
+	token, kitPath, kitSHA256, resultsDir, bootstrapPath string
+	lanbayURL, lanbayPassword                            string
+	maxResultBytes                                       int64
+	inactivity                                           time.Duration
+	logger                                               *slog.Logger
 
 	mu       sync.Mutex
 	lastUsed time.Time
@@ -98,7 +105,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) serveBootstrap(w http.ResponseWriter, r *http.Request) {
-	b, err := readBootstrap()
+	b, err := readBootstrapPath(s.bootstrapPath)
 	if err != nil {
 		http.Error(w, "bootstrap unavailable", http.StatusInternalServerError)
 		return
@@ -109,9 +116,21 @@ func (s *server) serveBootstrap(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(replacer.Replace(string(b))))
 }
 
-func readBootstrap() ([]byte, error) {
-	for _, path := range []string{"spikes/bootstrap.ps1", "../../spikes/bootstrap.ps1"} {
-		if b, err := os.ReadFile(path); err == nil {
+func readBootstrap() ([]byte, error) { return readBootstrapPath("") }
+
+func readBootstrapPath(path string) ([]byte, error) {
+	if path != "" {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		return b, nil
+	}
+	for _, candidate := range []string{
+		"spikes/bootstrap.ps1", "../../spikes/bootstrap.ps1",
+		"spikes/verify/bootstrap.ps1", "../../spikes/verify/bootstrap.ps1",
+	} {
+		if b, err := os.ReadFile(candidate); err == nil {
 			return b, nil
 		}
 	}
@@ -126,14 +145,34 @@ func (s *server) storeResults(r *http.Request) error {
 	}
 	defer r.Body.Close()
 	ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	var saved string
 	if strings.HasPrefix(ct, "multipart/") {
-		return storeMultipart(dir, r.Body, r.Header.Get("Content-Type"), s.maxResultBytes)
+		name := "results.zip"
+		saved = filepath.Join(dir, name)
+		if err := storeMultipart(dir, r.Body, r.Header.Get("Content-Type"), s.maxResultBytes); err != nil {
+			return err
+		}
+		// storeMultipart writes its own filename; discover it.
+		entries, _ := os.ReadDir(dir)
+		if len(entries) > 0 {
+			saved = filepath.Join(dir, entries[0].Name())
+		}
+	} else {
+		name := filepath.Base(r.Header.Get("X-Lanbay-Result-Name"))
+		if name == "." || name == "" {
+			name = "results.zip"
+		}
+		saved = filepath.Join(dir, name)
+		if err := copyResult(saved, r.Body); err != nil {
+			return err
+		}
 	}
-	name := filepath.Base(r.Header.Get("X-Lanbay-Result-Name"))
-	if name == "." || name == "" {
-		name = "results.zip"
-	}
-	return copyResult(filepath.Join(dir, name), r.Body)
+	// Extract and generate summary.md
+	extractDir := filepath.Join(dir, "extracted")
+	_ = extractResultsZip(saved, extractDir)
+	_ = generateSummary(extractDir, s.lanbayURL, s.lanbayPassword)
+	_ = generateSummary(dir, s.lanbayURL, s.lanbayPassword)
+	return nil
 }
 
 func storeMultipart(dir string, body io.Reader, contentType string, limit int64) error {
@@ -262,10 +301,43 @@ func main() {
 	results := flag.String("results", "m0-results", "result directory")
 	idle := flag.Duration("idle-timeout", 30*time.Minute, "idle shutdown timeout")
 	max := flag.Int64("max-result-bytes", defaultMaxResultBytes, "maximum result upload size")
+	mode := flag.String("mode", "spike", "kit mode: spike or verify")
+	bootstrap := flag.String("bootstrap", "", "path to bootstrap template")
+	lanbayURL := flag.String("lanbay-url", "", "Lanbay base URL for verify login")
+	lanbayPassword := flag.String("lanbay-password", "", "Lanbay password (or env LANBAY_PASSWORD)")
+	verifyLogin := flag.Bool("verify-login", false, "perform Lanbay login + volume inventory and exit")
+	summarize := flag.Bool("summarize", false, "generate summary.md from a results directory and exit")
+	resultsDirFlag := flag.String("results-dir", "", "results directory for -summarize")
 	flag.Parse()
+	if *lanbayPassword == "" {
+		*lanbayPassword = os.Getenv("LANBAY_PASSWORD")
+	}
 	if *idle <= 0 || *max <= 0 {
 		slog.Error("idle-timeout and max-result-bytes must be positive")
 		os.Exit(2)
+	}
+	if *summarize {
+		dir := *resultsDirFlag
+		if dir == "" {
+			slog.Error("results-dir is required for -summarize")
+			os.Exit(2)
+		}
+		if err := generateSummary(dir, *lanbayURL, *lanbayPassword); err != nil {
+			slog.Error("summarize", "error", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	if *verifyLogin {
+		if *lanbayURL == "" || *lanbayPassword == "" {
+			slog.Error("lanbay-url and lanbay-password are required for verify-login")
+			os.Exit(2)
+		}
+		if err := runVerifyLogin(context.Background(), *lanbayURL, *lanbayPassword); err != nil {
+			slog.Error("verify login", "error", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
 	addr, err := net.ResolveTCPAddr("tcp", *listen)
 	if err != nil {
@@ -301,10 +373,231 @@ func main() {
 		slog.Error("kit", "error", err)
 		os.Exit(1)
 	}
+	s.bootstrapPath = *bootstrap
+	if s.bootstrapPath == "" && *mode == "verify" {
+		s.bootstrapPath = "spikes/verify/bootstrap.ps1"
+	}
+	s.lanbayURL = *lanbayURL
+	s.lanbayPassword = *lanbayPassword
 	host, port, _ := net.SplitHostPort(listener.Addr().String())
 	fmt.Printf("En PowerShell elevado de Windows, pegue:\nirm 'http://%s/%s/bootstrap.ps1' | iex\n", net.JoinHostPort(host, port), token)
 	if err := s.run(context.Background(), listener); err != nil && !errors.Is(err, context.Canceled) {
 		slog.Error("server", "error", err)
 		os.Exit(1)
 	}
+}
+
+// lanbayHTTPClient returns an HTTP client suitable for talking to a Lanbay
+// instance, including its self-signed TLS certificate on the LAN.
+func lanbayHTTPClient(baseURL string) *http.Client {
+	tr := &http.Transport{}
+	if strings.HasPrefix(baseURL, "https://") {
+		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+	return &http.Client{Transport: tr, Timeout: 30 * time.Second}
+}
+
+func lanbayLogin(ctx context.Context, baseURL, password string) (string, error) {
+	client := lanbayHTTPClient(baseURL)
+	body, _ := json.Marshal(map[string]string{"password": password})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+"/api/v1/auth/login", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("login failed: %d %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == auth.CookieName {
+			return c.Value, nil
+		}
+	}
+	// Fallback: parse Set-Cookie header manually.
+	for _, h := range resp.Header.Values("Set-Cookie") {
+		if strings.HasPrefix(h, auth.CookieName+"=") {
+			parts := strings.SplitN(h, ";", 2)
+			val := strings.TrimPrefix(parts[0], auth.CookieName+"=")
+			if val != "" {
+				return val, nil
+			}
+		}
+	}
+	return "", errors.New("session cookie not returned")
+}
+
+func lanbayVolumes(ctx context.Context, baseURL, sessionCookie string) ([]map[string]any, error) {
+	client := lanbayHTTPClient(baseURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/api/v1/volumes", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.AddCookie(&http.Cookie{Name: auth.CookieName, Value: sessionCookie})
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("volumes failed: %d %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	var out struct {
+		Volumes []map[string]any `json:"volumes"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out.Volumes, nil
+}
+
+func runVerifyLogin(ctx context.Context, baseURL, password string) error {
+	cookie, err := lanbayLogin(ctx, baseURL, password)
+	if err != nil {
+		return err
+	}
+	vols, err := lanbayVolumes(ctx, baseURL, cookie)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(os.Stdout)
+	return enc.Encode(map[string]any{"ok": true, "volumes": vols})
+}
+
+type summaryCriterion struct {
+	ID      string
+	Section string
+	Name    string
+	Title   string
+}
+
+var summaryCriteria = []summaryCriterion{
+	{"JCB-468", "M1", "icacls", "DACL de C:\\ProgramData\\Lanbay y initial-password.txt"},
+	{"JCB-468", "M1", "junction-root", "Arranque con raíz como junction (debe negarse)"},
+	{"JCB-468", "M1", "junction-internal", "Junction interna hacia System32 (debe negarse)"},
+	{"JCB-468", "M1", "set-password-noecho", "set-password sin eco"},
+	{"JCB-468", "M1", "disk-inventory", "Inventario de discos vía API"},
+	{"JCB-468", "M1", "lanbay-login", "Login HTTPS desde la Mac"},
+	{"JCB-476", "M4", "search", "Búsqueda winget"},
+	{"JCB-476", "M4", "install", "Instalación (código 0/3010/1641)"},
+	{"JCB-476", "M4", "update", "Actualización"},
+	{"JCB-476", "M4", "uninstall", "Desinstalación gestionada"},
+	{"JCB-476", "M4", "reconciliation-missing", "Reconciliación missing tras desinstalar fuera del panel"},
+	{"JCB-476", "M4", "e3-preexisting-reject", "E3: app preexistente rechazada"},
+	{"JCB-476", "M4", "sw1-appexeclink", "SW-1: resolución vía APPEXECLINK"},
+	{"JCB-479", "M5", "b3-staging-dir", "B3: el producto crea staging"},
+	{"JCB-479", "M5", "b2-path-outside-staging", "B2: ruta fuera de staging rechazada"},
+	{"JCB-479", "M5", "authenticode", "Authenticode"},
+	{"JCB-479", "M5", "msi-silent-install", "MSI silencioso"},
+	{"JCB-479", "M5", "exe-interactive", "EXE interactivo (captura + confirmación)"},
+	{"JCB-479", "M5", "registry-diff", "Diff del registro (0/1/más de 1)"},
+	{"JCB-479", "M5", "uninstall", "Desinstalación de instaladores"},
+}
+
+func generateSummary(resultsDir, lanbayURL, password string) error {
+	results := map[string]map[string]any{}
+	filepath.WalkDir(resultsDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".json") {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		var v map[string]any
+		if err := json.Unmarshal(b, &v); err != nil {
+			return nil
+		}
+		rel, _ := filepath.Rel(resultsDir, path)
+		key := strings.TrimSuffix(filepath.ToSlash(rel), ".json")
+		results[key] = v
+		return nil
+	})
+
+	var b strings.Builder
+	b.WriteString("# Summary de verificación (JCB-485)\n\n")
+	b.WriteString("| Criterio | Sección | Resultado | Evidencia |\n")
+	b.WriteString("|---|---|---|---|\n")
+
+	for _, c := range summaryCriteria {
+		key := c.Section + "/" + c.Name
+		status := "sin dato"
+		evidence := ""
+		if v, ok := results[key]; ok {
+			if s, ok := v["status"].(string); ok && s != "" {
+				status = s
+			}
+			if ev, ok := v["evidence"]; ok {
+				raw, _ := json.Marshal(ev)
+				evidence = string(raw)
+				if len(evidence) > 120 {
+					evidence = evidence[:120] + "…"
+				}
+			}
+		}
+		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", c.ID+" "+c.Title, c.Section, status, strings.ReplaceAll(evidence, "|", "\\|"))
+	}
+
+	// Login desde la Mac
+	if lanbayURL != "" && password != "" {
+		b.WriteString("\n## Login desde la Mac (JCB-468 paso 3)\n\n")
+		cookie, err := lanbayLogin(context.Background(), lanbayURL, password)
+		if err != nil {
+			fmt.Fprintf(&b, "- Resultado: **fail** (%s)\n", err.Error())
+		} else {
+			vols, err := lanbayVolumes(context.Background(), lanbayURL, cookie)
+			if err != nil {
+				fmt.Fprintf(&b, "- Resultado: **fail** (%s)\n", err.Error())
+			} else {
+				b.WriteString("- Resultado: **pass**\n")
+				fmt.Fprintf(&b, "- Volúmenes detectados: %d\n", len(vols))
+			}
+		}
+	}
+
+	out := filepath.Join(resultsDir, "summary.md")
+	return os.WriteFile(out, []byte(b.String()), 0644)
+}
+
+func extractResultsZip(zipPath, dest string) error {
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		return err
+	}
+	for _, f := range r.File {
+		target := filepath.Join(dest, f.Name)
+		if f.FileInfo().IsDir() {
+			os.MkdirAll(target, 0755)
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return err
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return err
+		}
+		out, err := os.Create(target)
+		if err != nil {
+			rc.Close()
+			return err
+		}
+		_, copyErr := io.Copy(out, rc)
+		out.Close()
+		rc.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+	}
+	return nil
 }

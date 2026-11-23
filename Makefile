@@ -12,6 +12,14 @@ windows: web
 	mkdir -p dist
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-X main.version=$(VERSION)" -o dist/lanbay.exe ./cmd/lanbay
 
+ally-verify-kit:
+	rm -rf dist/ally-verify-kit dist/lanbay-verify-kit.zip dist/lanbay-verify-kit.zip.sha256
+	mkdir -p dist/ally-verify-kit
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o dist/ally-verify-kit/lanbay.exe ./cmd/lanbay
+	cp spikes/verify/verify.ps1 dist/ally-verify-kit/
+	cp spikes/verify/bootstrap.ps1 dist/ally-verify-kit/bootstrap.ps1
+	go run ./tools/kitpack -source dist/ally-verify-kit -output dist/lanbay-verify-kit.zip -sha256 dist/lanbay-verify-kit.zip.sha256
+
 ally-kit:
 	rm -rf dist/ally-kit dist/lanbay-m0-kit.zip dist/lanbay-m0-kit.zip.sha256
 	mkdir -p dist/ally-kit/{volumes,winget-backend,recycle-bin,execution-context}
