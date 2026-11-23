@@ -220,6 +220,7 @@ func runInstall(ctx context.Context) {
 	if err != nil {
 		fatal(err)
 	}
+	platform.StopRunningInstance()
 	dst, err := platform.InstallBinary(src)
 	if err != nil {
 		fatal(err)
@@ -246,9 +247,15 @@ func runUninstall(ctx context.Context) {
 		fatal(errors.New("lanbay uninstall must run as Administrator"))
 	}
 	dataDir := config.DefaultDataDir()
-	c, err := config.Load(dataDir)
-	if err != nil {
-		fatal(err)
+	var c config.Config
+	if _, err := os.Stat(dataDir); err == nil {
+		loaded, err := config.Load(dataDir)
+		if err != nil {
+			fatal(err)
+		}
+		c = loaded
+	} else {
+		c = config.Default(dataDir)
 	}
 	if c.DataDir == "" {
 		c = config.Default(dataDir)
@@ -261,15 +268,15 @@ func runUninstall(ctx context.Context) {
 	if trimmed == "n" || trimmed == "no" {
 		keep = false
 	}
+	platform.StopRunningInstance()
+	if err := platform.RemoveFirewallRule(); err != nil {
+		slog.Warn("remove firewall rule", "error", err)
+	}
 	if err := platform.UninstallScheduledTask(); err != nil {
 		slog.Warn("remove scheduled task", "error", err)
 	}
-	platform.StopRunningInstance()
 	if err := platform.RemoveInstallDir(); err != nil {
 		slog.Warn("remove install dir", "error", err)
-	}
-	if err := platform.RemoveFirewallRule(); err != nil {
-		slog.Warn("remove firewall rule", "error", err)
 	}
 	if !keep {
 		if err := config.RemoveDataDir(c.DataDir); err != nil {

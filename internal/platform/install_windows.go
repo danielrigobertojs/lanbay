@@ -46,9 +46,20 @@ func InstallBinary(srcExe string) (string, error) {
 		return "", err
 	}
 	dst := InstallBinPath(pf)
-	if err := copyFile(srcExe, dst); err != nil {
-		_ = os.Remove(dst)
-		return "", fmt.Errorf("copy binary: %w", err)
+	if srcInfo, err := os.Stat(srcExe); err == nil {
+		if dstInfo, err := os.Stat(dst); err == nil && os.SameFile(srcInfo, dstInfo) {
+			// Already installed at the destination; nothing to copy.
+		} else {
+			if err := copyFile(srcExe, dst); err != nil {
+				_ = os.Remove(dst)
+				return "", fmt.Errorf("copy binary: %w", err)
+			}
+		}
+	} else {
+		if err := copyFile(srcExe, dst); err != nil {
+			_ = os.Remove(dst)
+			return "", fmt.Errorf("copy binary: %w", err)
+		}
 	}
 	if err := CheckInstallPathWritable(dst); err != nil {
 		_ = os.Remove(dst)
@@ -93,56 +104,25 @@ func untrustedWriters(path string) ([]string, error) {
 		// A null DACL grants everyone full control.
 		return []string{"Everyone"}, nil
 	}
-	seen := map[string]bool{}
-	var writers []string
+	var entries []ACLEntry
 	for i := uint16(0); i < dacl.AceCount; i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
 			return nil, err
-		}
-		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
-			continue
-		}
-		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
-			continue
-		}
-		if !hasWriteMask(uint32(ace.Mask)) {
-			continue
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		sidStr := sid.String()
 		if sidStr == "" {
 			sidStr = "unknown"
 		}
-		if IsTrustedTrustee(sidStr) {
-			continue
-		}
-		if !seen[sidStr] {
-			seen[sidStr] = true
-			writers = append(writers, sidStr)
-		}
+		entries = append(entries, ACLEntry{
+			Trustee:     sidStr,
+			Mask:        uint32(ace.Mask),
+			InheritOnly: ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0,
+			Allowed:     ace.Header.AceType == windows.ACCESS_ALLOWED_ACE_TYPE,
+		})
 	}
-	return writers, nil
-}
-
-func hasWriteMask(mask uint32) bool {
-	if mask&windows.GENERIC_ALL != 0 {
-		return true
-	}
-	if mask&windows.GENERIC_WRITE != 0 {
-		return true
-	}
-	const fileGenericWrite = 0x00120116
-	if mask&fileGenericWrite != 0 {
-		return true
-	}
-	// FILE_WRITE_DATA, FILE_APPEND_DATA, FILE_WRITE_EA, FILE_WRITE_ATTRIBUTES
-	for _, bit := range []uint32{0x00000002, 0x00000004, 0x00000010, 0x00000100} {
-		if mask&bit != 0 {
-			return true
-		}
-	}
-	return false
+	return UntrustedWritersFromEntries(entries), nil
 }
 
 func copyFile(src, dst string) error {
@@ -175,12 +155,14 @@ func InstallScheduledTask(exePath string) error {
 	return nil
 }
 
-// UninstallScheduledTask removes the Lanbay scheduled task if present.
+// UninstallScheduledTask stops and removes the Lanbay scheduled task if present.
 func UninstallScheduledTask() error {
-	cmd := exec.Command("schtasks.exe", "/Delete", "/TN", scheduledTaskName, "/F")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		if !containsNotFound(string(out)) {
-			return fmt.Errorf("delete scheduled task: %w: %s", err, string(out))
+	for _, args := range [][]string{SchtasksEndArgs(), SchtasksDeleteArgs()} {
+		cmd := exec.Command(args[0], args[1:]...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			if args[1] == "/Delete" && !containsNotFound(string(out)) {
+				return fmt.Errorf("delete scheduled task: %w: %s", err, string(out))
+			}
 		}
 	}
 	return nil
@@ -206,10 +188,22 @@ func RemoveFirewallRule() error {
 	return nil
 }
 
-// StopRunningInstance terminates any running Lanbay process before uninstall.
+// StopRunningInstance stops the scheduled task and any other lanbay.exe
+// instances, without killing the uninstall process itself.
 func StopRunningInstance() {
-	cmd := exec.Command("taskkill.exe", "/IM", "lanbay.exe", "/F")
-	_ = cmd.Run()
+	for _, args := range StopRunningInstanceCommands(os.Getpid()) {
+		cmd := exec.Command(args[0], args[1:]...)
+		_ = cmd.Run()
+	}
+	// If uninstall runs from the installed binary, it cannot be deleted now;
+	// mark it for deletion on the next reboot.
+	if pf, err := ProgramFilesDir(); err == nil {
+		if exe, err := os.Executable(); err == nil && IsUnderInstallDir(exe, pf) {
+			if p, err := windows.UTF16PtrFromString(exe); err == nil {
+				_ = windows.MoveFileEx(p, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
+			}
+		}
+	}
 }
 
 func containsNotFound(s string) bool {
