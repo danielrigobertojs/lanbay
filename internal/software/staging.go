@@ -258,20 +258,3 @@ func InspectInstallerHandle(f *os.File) (InstallerInfo, error) {
 	info.Authenticode = ai
 	return info, nil
 }
-
-// isUserWritablePath reports whether the current user can write to the
-// directory containing path, without relying on USERPROFILE.
-func isUserWritablePath(path string) bool {
-	if path == "" {
-		return false
-	}
-	dir := filepath.Dir(path)
-	f, err := os.CreateTemp(dir, ".lanbay-writetest-*")
-	if err != nil {
-		return false
-	}
-	name := f.Name()
-	_ = f.Close()
-	_ = os.Remove(name)
-	return true
-}

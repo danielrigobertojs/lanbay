@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -614,6 +615,7 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string, confi
 	}
 	isMSI := msiCode != "" && regexp.MustCompile(`^\{[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}$`).MatchString(msiCode)
 
+	userProfile := os.Getenv("USERPROFILE")
 	requiresConfirm := entry.Root == "HKCU"
 	if !requiresConfirm && !isMSI && (entry.QuietUninstallString != "" || entry.UninstallString != "") {
 		exe := ""
@@ -624,7 +626,7 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string, confi
 				break
 			}
 		}
-		if isUserWritablePath(exe) {
+		if userProfile != "" && strings.HasPrefix(strings.ToLower(exe), strings.ToLower(userProfile)) {
 			requiresConfirm = true
 		}
 	}

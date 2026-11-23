@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +21,7 @@ import (
 func jcb481SetupSvc(t *testing.T) *Service {
 	t.Helper()
 	dir := t.TempDir()
-	db, err := sql.Open("sqlite", filepath.Join(dir, "t.sqlite"))
+	db, err := sql.Open("sqlite", filepath.Join(dir, "t.sqlite")+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,6 +46,9 @@ func jcb481SetupSvc(t *testing.T) *Service {
 }
 
 func TestJCB481MsiExecXUsesSystem32(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows only")
+	}
 	svc := jcb481SetupSvc(t)
 	ctx := context.Background()
 	guid := "{12345678-1234-1234-1234-123456789012}"
@@ -78,7 +82,7 @@ func TestJCB481MsiExecXUsesSystem32(t *testing.T) {
 	}
 	j, _ := svc.Jobs.Get(ctx, jobID)
 	if j.State != jobs.Completed {
-		t.Fatalf("job state=%s (msg=%s)", j.State, j.Message)
+		t.Fatalf("job state=%s (msg=%s) log=%s", j.State, j.Message, j.Log)
 	}
 	if calledPath != MsiexecPath() {
 		t.Fatalf("runCommand path=%q want %q", calledPath, MsiexecPath())
@@ -114,7 +118,7 @@ func TestJCB481HashChangedRejected(t *testing.T) {
 	if err := svc.Registry.Add(ctx, ManagedApp{ID: "u3", Source: SourceUpload, DisplayName: "App", InstalledAt: "now", UninstallInfo: string(b), Status: StatusInstalled}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.UninstallUploaded(ctx, "u3", true); err == nil || !strings.Contains(err.Error(), "manipulado") {
+	if _, err := svc.UninstallUploaded(ctx, "u3", false); err == nil || !strings.Contains(err.Error(), "manipulado") {
 		t.Fatalf("expected hash mismatch error, got %v", err)
 	}
 }

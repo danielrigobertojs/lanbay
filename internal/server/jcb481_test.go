@@ -130,21 +130,42 @@ func TestJCB481StagingReauthAfterFileReturns401(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status=%d want 401", w.Code)
 	}
+	entries, _ := os.ReadDir(filepath.Join(s.config.DataDir, "staging"))
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".part") {
+			t.Fatalf("residual part file: %s", e.Name())
+		}
+	}
 }
 
 func TestJCB481StagingOversizeReturns413(t *testing.T) {
 	s := jcb481ServerWithSoftware(t)
-	s.config.MaxUploadBytes = 16
+	s.config.MaxUploadBytes = 64 << 10
 	id, csrf, _, err := s.auth.Login(context.Background(), netip.MustParseAddr("127.0.0.1"), "correct horse battery")
 	if err != nil {
 		t.Fatal(err)
 	}
-	content := append([]byte{0x4D, 0x5A}, bytes.Repeat([]byte("A"), 64)...)
-	body, ct := jcb481MultipartBody(t, map[string]string{"reauth_password": "correct horse battery"}, content, "ok.exe")
-	req := httptest.NewRequest(http.MethodPost, "https://localhost/api/v1/software/staging", body)
+	// reauth first, then a file larger than the limit (and the 4 KiB multipart buffer)
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if err := mw.WriteField("reauth_password", "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	fw, err := mw.CreateFormFile("file", "ok.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := append([]byte{0x4D, 0x5A}, bytes.Repeat([]byte("A"), 256<<10)...)
+	if _, err := fw.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "https://localhost/api/v1/software/staging", &buf)
 	req.Host = "localhost"
 	req.RemoteAddr = "127.0.0.1:1234"
-	req.Header.Set("Content-Type", ct)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req.AddCookie(&http.Cookie{Name: authCookieName(), Value: id})
 	req.Header.Set("X-CSRF-Token", csrf)
 	w := httptest.NewRecorder()
