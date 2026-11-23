@@ -599,24 +599,6 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string, confi
 	// INS-5: confirmation check before creating the job (synchronous).
 	var entry UninstallEntry
 	_ = json.Unmarshal([]byte(app.UninstallInfo), &entry)
-	userProfile := os.Getenv("USERPROFILE")
-	requiresConfirm := entry.Root == "HKCU"
-	if !requiresConfirm && (entry.QuietUninstallString != "" || entry.UninstallString != "") {
-		exe := ""
-		for _, cand := range []string{entry.QuietUninstallString, entry.UninstallString} {
-			parts := splitCommand(cand)
-			if len(parts) > 0 {
-				exe = parts[0]
-				break
-			}
-		}
-		if userProfile != "" && strings.HasPrefix(strings.ToLower(exe), strings.ToLower(userProfile)) {
-			requiresConfirm = true
-		}
-	}
-	if requiresConfirm && !confirm {
-		return "", fmt.Errorf("desinstalador en perfil de usuario: confirmación requerida")
-	}
 	// Resolve MSI product code first (live branch).
 	msiCode := entry.ProductCode
 	if msiCode == "" && strings.HasPrefix(app.UninstallInfo, "msi:") {
@@ -632,6 +614,25 @@ func (s *Service) UninstallUploaded(ctx context.Context, managedID string, confi
 		}
 	}
 	isMSI := msiCode != "" && regexp.MustCompile(`^\{[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}$`).MatchString(msiCode)
+
+	userProfile := os.Getenv("USERPROFILE")
+	requiresConfirm := entry.Root == "HKCU"
+	if !requiresConfirm && !isMSI && (entry.QuietUninstallString != "" || entry.UninstallString != "") {
+		exe := ""
+		for _, cand := range []string{entry.QuietUninstallString, entry.UninstallString} {
+			parts := splitCommand(cand)
+			if len(parts) > 0 {
+				exe = parts[0]
+				break
+			}
+		}
+		if userProfile != "" && strings.HasPrefix(strings.ToLower(exe), strings.ToLower(userProfile)) {
+			requiresConfirm = true
+		}
+	}
+	if requiresConfirm && !confirm {
+		return "", fmt.Errorf("desinstalador en perfil de usuario: confirmación requerida")
+	}
 	// Synchronous hash check (fail-closed) before creating the job, only for non-MSI.
 	if !isMSI {
 		for _, cand := range []string{entry.QuietUninstallString, entry.UninstallString} {

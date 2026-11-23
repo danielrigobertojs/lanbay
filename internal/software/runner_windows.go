@@ -17,7 +17,7 @@ import (
 
 const createSuspended = 0x00000004
 
-func runCommand(ctx context.Context, path string, args []string, env []string, dir string, out io.Writer) (int, []byte, error) {
+func runCommandImpl(ctx context.Context, path string, args []string, env []string, dir string, out io.Writer) (int, []byte, error) {
 	var buf bytes.Buffer
 	w := io.MultiWriter(out, &cappedWriter{buf: &buf, cap: 1 << 20})
 	cmd := exec.Command(path, args...)
@@ -119,3 +119,6 @@ func (c *cappedWriter) Write(p []byte) (int, error) {
 	}
 	return len(p), nil
 }
+
+// runCommand is a package-level variable so tests can replace it.
+var runCommand = runCommandImpl

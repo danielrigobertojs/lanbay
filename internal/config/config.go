@@ -34,10 +34,11 @@ type Config struct {
 	DiskAlertPercent int
 	AllowedHosts     []string
 	ProtectedPaths   []string
+	MaxUploadBytes   int64
 }
 
 func Default(dataDir string) Config {
-	return Config{DataDir: dataDir, Listen: ":8443", CertificateFile: filepath.Join(dataDir, "tls-cert.pem"), KeyFile: filepath.Join(dataDir, "tls-key.pem"), AllowedNetworks: DefaultNetworks(), AllowedHosts: DefaultHosts(), SessionIdle: 12 * time.Hour, DiskAlertPercent: 90}
+	return Config{DataDir: dataDir, Listen: ":8443", CertificateFile: filepath.Join(dataDir, "tls-cert.pem"), KeyFile: filepath.Join(dataDir, "tls-key.pem"), AllowedNetworks: DefaultNetworks(), AllowedHosts: DefaultHosts(), SessionIdle: 12 * time.Hour, DiskAlertPercent: 90, MaxUploadBytes: 128 << 20}
 }
 func DefaultHosts() []string {
 	h, _ := os.Hostname()
@@ -122,6 +123,12 @@ func Load(dataDir string) (Config, error) {
 			c.AllowedHosts = splitStrings(value)
 		case "protected_paths":
 			c.ProtectedPaths = splitStrings(value)
+		case "max_upload_bytes":
+			n, e := strconv.ParseInt(value, 10, 64)
+			if e != nil || n < 1 {
+				return c, fmt.Errorf("invalid max_upload_bytes")
+			}
+			c.MaxUploadBytes = n
 		}
 	}
 	return c, nil
@@ -143,7 +150,7 @@ func Save(c Config) error {
 	for _, path := range c.ProtectedPaths {
 		protected = append(protected, "\""+path+"\"")
 	}
-	content := fmt.Sprintf("listen = %q\ncertificate_file = %q\nkey_file = %q\nsession_idle_hours = %d\ndisk_alert_percent = %d\nallowed_networks = [%s]\nallowed_hosts = [%s]\nprotected_paths = [%s]\n", c.Listen, c.CertificateFile, c.KeyFile, int(c.SessionIdle.Hours()), c.DiskAlertPercent, strings.Join(prefixes, ", "), strings.Join(hosts, ", "), strings.Join(protected, ", "))
+	content := fmt.Sprintf("listen = %q\ncertificate_file = %q\nkey_file = %q\nsession_idle_hours = %d\ndisk_alert_percent = %d\nallowed_networks = [%s]\nallowed_hosts = [%s]\nprotected_paths = [%s]\nmax_upload_bytes = %d\n", c.Listen, c.CertificateFile, c.KeyFile, int(c.SessionIdle.Hours()), c.DiskAlertPercent, strings.Join(prefixes, ", "), strings.Join(hosts, ", "), strings.Join(protected, ", "), c.MaxUploadBytes)
 	return os.WriteFile(filepath.Join(c.DataDir, fileName), []byte(content), 0600)
 }
 func splitStrings(value string) []string {
