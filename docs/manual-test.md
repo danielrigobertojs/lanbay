@@ -111,10 +111,15 @@ En la Ally, en PowerShell elevado, pegar la línea impresa por kitserver (`irm '
 Tras recibir los resultados, desde la Mac se valida el login de punta a punta contra el Lanbay de la Ally:
 
 ```
-go run ./tools/kitserver -verify-login -lanbay-url https://<ally>:<port> -lanbay-password '<password>'
+LANBAY_PASSWORD='<password>' go run ./tools/kitserver -verify-login -lanbay-url https://<ally>:<port> -lanbay-cert-sha256 '<sha256>'
 ```
 
 Debe imprimir el inventario de volúmenes. Esto demuestra el filtro LAN y la autenticación de punta a punta.
 
 
 Los resultados se consolidan en `summary.md` (JCB-485) relacionando cada criterio de JCB-468, JCB-476 y JCB-479 con su evidencia.
+
+### Seguridad (M1/M3/M4)
+- Para evitar la contraseña en la línea de comandos, definir `LANBAY_PASSWORD` en el entorno antes de ejecutar el kit (`$env:LANBAY_PASSWORD = '...'`).
+- Anclar el certificado TLS de Lanbay con `-lanbay-cert-sha256 <sha256>` en kitserver (`-verify-login`); si no coincide, el login desde la Mac falla.
+

@@ -2,6 +2,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -245,7 +246,7 @@ func TestVerifyLoginEndToEnd(t *testing.T) {
 	ts := httptest.NewTLSServer(srv.Handler())
 	defer ts.Close()
 	// override TLS client skip verify already in lanbayHTTPClient
-	if err := runVerifyLogin(context.Background(), ts.URL, "correct horse battery"); err != nil {
+	if err := runVerifyLogin(context.Background(), ts.URL, "correct horse battery", ""); err != nil {
 		t.Fatalf("verify login failed: %v", err)
 	}
 }
@@ -267,7 +268,7 @@ func TestGenerateSummaryFromSyntheticResults(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := generateSummary(root, "", ""); err != nil {
+	if err := generateSummary(root, "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(root, "summary.md"))
@@ -279,5 +280,93 @@ func TestGenerateSummaryFromSyntheticResults(t *testing.T) {
 		if !strings.Contains(s, needle) {
 			t.Fatalf("summary missing %q", needle)
 		}
+	}
+}
+
+func TestExtractResultsZipRejectsTraversal(t *testing.T) {
+	root := t.TempDir()
+	zipPath := filepath.Join(root, "bad.zip")
+	f, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	w, _ := zw.Create("../../escaped.txt")
+	_, _ = w.Write([]byte("escaped"))
+	zw.Close()
+	f.Close()
+
+	dest := filepath.Join(root, "dest")
+	if err := extractResultsZip(zipPath, dest); err == nil {
+		t.Fatal("expected error for traversal entry")
+	}
+	if _, err := os.Stat(filepath.Join(root, "escaped.txt")); err == nil {
+		t.Fatal("file escaped destination")
+	}
+}
+
+func TestExtractResultsZipAcceptsNormal(t *testing.T) {
+	root := t.TempDir()
+	zipPath := filepath.Join(root, "good.zip")
+	f, _ := os.Create(zipPath)
+	zw := zip.NewWriter(f)
+	w, _ := zw.Create("a/b.txt")
+	_, _ = w.Write([]byte("ok"))
+	zw.Close()
+	f.Close()
+	dest := filepath.Join(root, "dest")
+	if err := extractResultsZip(zipPath, dest); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dest, "a", "b.txt"))
+	if err != nil || string(b) != "ok" {
+		t.Fatalf("extracted file missing: %v", err)
+	}
+}
+
+func TestLanbayLoginCertPinMismatch(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(context.Background(), filepath.Join(dir, "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c := config.Default(dir)
+	c.AllowedHosts = []string{"localhost", "::1"}
+	srv := lanbayserver.New(c, db, testVolumes{{ID: "C:\\\\"}}, "test")
+	if err := srv.SetPassword(context.Background(), "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewTLSServer(srv.Handler())
+	defer ts.Close()
+	// wrong cert SHA
+	_, err = lanbayLogin(context.Background(), ts.URL, "correct horse battery", "0000000000000000000000000000000000000000000000000000000000000000")
+	if err == nil {
+		t.Fatal("expected cert pin mismatch error")
+	}
+}
+
+func TestLanbayVolumesCertPinMismatch(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(context.Background(), filepath.Join(dir, "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c := config.Default(dir)
+	c.AllowedHosts = []string{"localhost", "::1"}
+	srv := lanbayserver.New(c, db, testVolumes{{ID: "C:\\\\"}}, "test")
+	if err := srv.SetPassword(context.Background(), "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewTLSServer(srv.Handler())
+	defer ts.Close()
+	cookie, err := lanbayLogin(context.Background(), ts.URL, "correct horse battery", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = lanbayVolumes(context.Background(), ts.URL, cookie, "0000000000000000000000000000000000000000000000000000000000000000")
+	if err == nil {
+		t.Fatal("expected cert pin mismatch error")
 	}
 }
