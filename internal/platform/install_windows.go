@@ -17,13 +17,7 @@ func IsWindows() bool { return true }
 
 // InstallScheduledTask registers the Lanbay elevated logon task per ADR-004.
 func InstallScheduledTask(exePath string) error {
-	script := `$ErrorActionPreference='Stop'
-$exe='` + exePath + `'
-$principal=New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
-$action=New-ScheduledTaskAction -Execute $exe
-$trigger=New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
-$settings=New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Register-ScheduledTask -TaskName '` + scheduledTaskName + `' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null`
+	script := scheduledTaskScript(exePath)
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("register scheduled task: %w: %s", err, string(out))
@@ -48,7 +42,7 @@ func AddFirewallRule(port int) error {
 	_ = RemoveFirewallRule()
 	cmd := exec.Command("netsh", "advfirewall", "firewall", "add", "rule",
 		"name=Lanbay HTTPS", "dir=in", "action=allow", "protocol=TCP",
-		"localport="+strconv.Itoa(port), "profile=private", "enable=yes")
+		"localport="+strconv.Itoa(port), "profile=private", "remoteip=localsubnet", "enable=yes")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("add firewall rule: %w: %s", err, string(out))
 	}
