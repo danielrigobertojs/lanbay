@@ -31,7 +31,7 @@ while IFS= read -r file; do
 		# internal/software/finalpath_unix.go: os.Open/os.Lstat/EvalSymlinks para canonicalizar
 		# la ruta en desarrollo (Unix no es plataforma objetivo).
 			;;
-		internal/config/datadir_unix.go|internal/config/datadir_windows.go|internal/server/server.go|internal/server/tls.go|spikes/*|tools/kitpack/main.go|tools/kitserver/main.go)
+		internal/config/datadir_unix.go|internal/config/datadir_windows.go|internal/platform/install_windows.go|internal/server/server.go|internal/server/tls.go|spikes/*|tools/kitpack/main.go|tools/kitserver/main.go)
 			;;
 		*)
 			echo "unreviewed filesystem entry point: $file" >&2

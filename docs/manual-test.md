@@ -123,3 +123,11 @@ Los resultados se consolidan en `summary.md` (JCB-485) relacionando cada criteri
 - Para evitar la contraseña en la línea de comandos, definir `LANBAY_PASSWORD` en el entorno antes de ejecutar el kit (`$env:LANBAY_PASSWORD = '...'`).
 - Anclar el certificado TLS de Lanbay con `-lanbay-cert-sha256 <sha256>` en kitserver (`-verify-login`); si no coincide, el login desde la Mac falla.
 
+## Instalación y tarea programada (M6)
+
+1. Instalar con `lanbay.exe install` desde una consola elevada.
+2. Confirmar que la tarea `Lanbay` apunta a `%ProgramFiles%\Lanbay\lanbay.exe` y no a la carpeta de descargas.
+3. Ejecutar `icacls "%ProgramFiles%\Lanbay\lanbay.exe"` y confirmar que `Users` y `Authenticated Users` no tienen permiso de escritura.
+4. Desinstalar con `lanbay.exe uninstall` y confirmar que se elimina `%ProgramFiles%\Lanbay` y la tarea.
+
+

@@ -216,11 +216,16 @@ func runInstall(ctx context.Context) {
 			fatal(fmt.Errorf("proteger contraseña inicial: %w", err))
 		}
 	}
-	exe, err := os.Executable()
+	src, err := os.Executable()
 	if err != nil {
 		fatal(err)
 	}
-	if err := platform.InstallScheduledTask(exe); err != nil {
+	platform.StopRunningInstance()
+	dst, err := platform.InstallBinary(src)
+	if err != nil {
+		fatal(err)
+	}
+	if err := platform.InstallScheduledTask(dst); err != nil {
 		fatal(err)
 	}
 	port := listenPort(c.Listen)
@@ -242,20 +247,38 @@ func runUninstall(ctx context.Context) {
 		fatal(errors.New("lanbay uninstall must run as Administrator"))
 	}
 	dataDir := config.DefaultDataDir()
-	c, _ := config.Load(dataDir)
+	var c config.Config
+	if _, err := os.Stat(dataDir); err == nil {
+		loaded, err := config.Load(dataDir)
+		if err != nil {
+			fatal(err)
+		}
+		c = loaded
+	} else {
+		c = config.Default(dataDir)
+	}
 	if c.DataDir == "" {
 		c = config.Default(dataDir)
 	}
-	fmt.Printf("Keep data directory %s? [y/N]: ", c.DataDir)
+	fmt.Printf("Keep data directory %s? [Y/n]: ", c.DataDir)
 	reader := bufio.NewReader(os.Stdin)
 	line, _ := reader.ReadString('\n')
-	keep := strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "y")
-	if err := platform.UninstallScheduledTask(); err != nil {
-		slog.Warn("remove scheduled task", "error", err)
+	trimmed := strings.ToLower(strings.TrimSpace(line))
+	keep := true
+	if trimmed == "n" || trimmed == "no" {
+		keep = false
 	}
+	platform.StopRunningInstance()
 	if err := platform.RemoveFirewallRule(); err != nil {
 		slog.Warn("remove firewall rule", "error", err)
 	}
+	if err := platform.UninstallScheduledTask(); err != nil {
+		slog.Warn("remove scheduled task", "error", err)
+	}
+	if err := platform.RemoveInstallDir(); err != nil {
+		slog.Warn("remove install dir", "error", err)
+	}
+	platform.MarkInstalledBinaryForDeletion()
 	if !keep {
 		if err := config.RemoveDataDir(c.DataDir); err != nil {
 			fatal(fmt.Errorf("remove data directory: %w", err))
